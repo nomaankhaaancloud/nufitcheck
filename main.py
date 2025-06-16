@@ -1006,22 +1006,22 @@ async def analyze_outfit(
         traceback.print_exc()
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-# New endpoint to serve audio files
-@app.get("/audio/{filename}")
-async def get_audio_file(filename: str):
-    """Serve audio files"""
-    try:
-        audio_path = os.path.join(AUDIO_DIR, filename)
-        if os.path.exists(audio_path):
-            return FileResponse(
-                audio_path,
-                media_type="audio/mpeg",
-                filename=filename
-            )
-        else:
-            raise HTTPException(status_code=404, detail="Audio file not found")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+# # New endpoint to serve audio files
+# @app.get("/audio/{filename}")
+# async def get_audio_file(filename: str):
+#     """Serve audio files"""
+#     try:
+#         audio_path = os.path.join(AUDIO_DIR, filename)
+#         if os.path.exists(audio_path):
+#             return FileResponse(
+#                 audio_path,
+#                 media_type="audio/mpeg",
+#                 filename=filename
+#             )
+#         else:
+#             raise HTTPException(status_code=404, detail="Audio file not found")
+#     except Exception as e:
+#         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/user/scans/")
 async def get_current_user_scans(current_user: dict = Depends(get_authenticated_user)):
@@ -1333,9 +1333,9 @@ async def get_scan_history(
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 # Public routes
-@app.get("/", response_class=HTMLResponse)
-async def serve_frontend(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request})
+# @app.get("/", response_class=HTMLResponse)
+# async def serve_frontend(request: Request):
+    # return templates.TemplateResponse("index.html", {"request": request})
 
 # Legacy endpoints (for backward compatibility - consider removing these)
 @app.post("/create-user/")
