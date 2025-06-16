@@ -114,3 +114,40 @@ def get_current_user_email(token: str) -> Optional[str]:
     if payload:
         return payload.get("sub")
     return None
+
+import secrets
+import pyotp
+
+def generate_mfa_secret() -> str:
+    return pyotp.random_base32()
+
+def verify_mfa_token(secret: str, token: str) -> bool:
+    try:
+        totp = pyotp.TOTP(secret)
+        return totp.verify(token, valid_window=1)
+    except Exception as e:
+        print(f"Error verifying MFA token: {e}")
+        return False
+
+def generate_backup_codes(count: int = 10) -> list:
+    return [secrets.token_hex(4).upper() for _ in range(count)]
+
+def create_access_token_with_mfa(data: Dict, expires_delta: Optional[timedelta] = None) -> str:
+    to_encode = data.copy()
+    if expires_delta:
+        expire = datetime.utcnow() + expires_delta
+    else:
+        expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    
+    to_encode.update({
+        "exp": expire, 
+        "iat": datetime.utcnow(),
+        "mfa_verified": data.get("mfa_verified", False)
+    })
+    
+    try:
+        encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+        return encoded_jwt
+    except Exception as e:
+        print(f"Error creating access token with MFA: {e}")
+        return None

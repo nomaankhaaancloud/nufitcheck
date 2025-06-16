@@ -14,7 +14,7 @@ from gpt import chat_with_gpt, load_image_messages
 from database import DatabaseManager
 from utils.mailservice import send_password_reset_email, log_password_reset_code
 from utils.authmiddleware import get_current_user, get_optional_current_user, get_authenticated_user
-from utils.key_func import create_access_token, generate_4_digit_code
+from utils.key_func import create_access_token, generate_4_digit_code, create_access_token_with_mfa
 from utils.voiceagent import generate_audio
 from dotenv import load_dotenv
 import base64
@@ -26,17 +26,14 @@ app = FastAPI()
 # Initialize database
 db = DatabaseManager()
 
-# Static files and templates
-app.mount("/static", StaticFiles(directory="static"), name="static")
-templates = Jinja2Templates(directory="static")  # Assuming HTML is in /static
 
 UPLOAD_DIR = "uploads"
 FRAME_DIR = "extracted_frames"
-AUDIO_DIR = "audio_files"
+# AUDIO_DIR = "audio_files"
 
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(FRAME_DIR, exist_ok=True)
-os.makedirs(AUDIO_DIR, exist_ok=True)
+# os.makedirs(AUDIO_DIR, exist_ok=True)
 
 # Pydantic models for request/response
 class UserSignup(BaseModel):
@@ -68,78 +65,51 @@ class SetNewPasswordRequest(BaseModel):
     reset_token: str
     new_password: str
 
+class MFASetupRequest(BaseModel):
+    pass
+
+class MFAVerifyRequest(BaseModel):
+    token: str
+
+class MFALoginRequest(BaseModel):
+    email: EmailStr
+    password: str
+    mfa_token: str
+
+class MFADisableRequest(BaseModel):
+    password: str
+
+
 
 def generate_response_audio_base64(text_content, scan_id, message_type="analysis"):
-    """Generate audio file for response and return base64 encoded data"""
+    """Generate audio as base64-encoded string without saving to disk"""
     try:
         print(f"Starting audio generation for {message_type} with scan_id: {scan_id}")
         
         # Extract appropriate text for audio generation
         if message_type == "analysis":
-            # For analysis, extract multiple fields from JSON
             audio_text = extract_analysis_fields_from_json(text_content)
         else:
-            # For chat, use the full response but limit length
-            audio_text = text_content[:200] if len(text_content) > 200 else text_content
+            audio_text = text_content[:1500] if len(text_content) > 1500 else text_content
         
         print(f"Audio text extracted: {audio_text[:50]}...")
-        
-        # Generate unique filename
-        audio_filename = f"{scan_id}_{message_type}_{uuid.uuid4().hex[:8]}.mp3"
-        audio_path = os.path.join(AUDIO_DIR, audio_filename)
-        
-        print(f"Audio will be saved to: {audio_path}")
-        
-        # Generate audio using the voice agent
-        success = generate_audio(
-            text=audio_text,
-            output_path=audio_path
-        )
-        
-        print(f"Audio generation result: {success}")
-        
-        if success and os.path.exists(audio_path):
-            file_size = os.path.getsize(audio_path)
-            print(f"Audio file created successfully. Size: {file_size} bytes")
-            
-            # Read the audio file and convert to base64
-            try:
-                with open(audio_path, "rb") as audio_file:
-                    audio_bytes = audio_file.read()
-                    audio_base64 = base64.b64encode(audio_bytes).decode('utf-8')
-                
-                # Optionally delete the file after encoding to save space
-                # os.remove(audio_path)  # Uncomment if you want to delete after encoding
-                
-                return {
-                    "audio_base64": audio_base64,
-                    "audio_format": "audio/mpeg",
-                    "filename": audio_filename
-                }
-                
-            except Exception as e:
-                print(f"Error reading audio file for base64 conversion: {e}")
-                return None
-                
+
+        # Call generate_audio and receive audio bytes directly (no file writing)
+        audio_bytes = generate_audio(text=audio_text)
+
+        if audio_bytes:
+            audio_base64 = base64.b64encode(audio_bytes).decode('utf-8')
+            audio_filename = f"{scan_id}_{message_type}_{uuid.uuid4().hex[:8]}.mp3"
+
+            return {
+                "audio_base64": audio_base64,
+                "audio_format": "audio/mpeg",
+                "filename": audio_filename
+            }
         else:
-            print(f"Failed to generate audio for {message_type}")
-            # Check if file was created but function returned False
-            if os.path.exists(audio_path):
-                print("Audio file exists but function returned False")
-                try:
-                    with open(audio_path, "rb") as audio_file:
-                        audio_bytes = audio_file.read()
-                        audio_base64 = base64.b64encode(audio_bytes).decode('utf-8')
-                    
-                    return {
-                        "audio_base64": audio_base64,
-                        "audio_format": "audio/mpeg",
-                        "filename": audio_filename
-                    }
-                except:
-                    return None
+            print(f"Audio generation failed for {message_type}")
             return None
-            
+
     except Exception as e:
         print(f"Error generating audio: {e}")
         import traceback
@@ -197,7 +167,7 @@ def extract_analysis_fields_from_json(json_text):
             print(f"Combined audio text from analysis: {combined_text[:100]}...")
             
             # Limit total length to avoid overly long audio
-            max_length = 500
+            max_length = 1500
             if len(combined_text) > max_length:
                 combined_text = combined_text[:max_length] + "..."
             
@@ -226,7 +196,6 @@ def extract_fit_line_from_json(json_text):
     # It will call the new comprehensive extraction function
     return extract_analysis_fields_from_json(json_text)
 
-# Authentication endpoints (keeping existing auth code unchanged)
 @app.post("/auth/signup", response_model=AuthResponse)
 async def signup(user_data: UserSignup):
     """User registration endpoint"""
@@ -246,12 +215,19 @@ async def signup(user_data: UserSignup):
                 detail="Email already registered"
             )
 
+        # Get user data immediately after creation
+        user = db.get_auth_user_by_email(user_data.email)
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to retrieve user after creation"
+            )
+
         # Create user profile for outfit analysis
         user_id = str(uuid.uuid4())
         profile_success = db.create_user(user_id, user_data.email)
         
         if not profile_success:
-            # Rollback: This is a simplified approach - in production consider transactions
             print(f"Warning: Failed to create user profile for {user_data.email}")
 
         # Create access token
@@ -262,14 +238,11 @@ async def signup(user_data: UserSignup):
                 detail="Failed to create access token"
             )
 
-        # Get user data
-        user = db.get_auth_user_by_email(user_data.email)
-        
         return {
             "access_token": access_token,
             "token_type": "bearer",
             "user": {
-                "id": user["id"],
+                "id": user["id"],  # This should now be a string
                 "email": user["email"],
                 "created_at": user["created_at"]
             }
@@ -278,6 +251,7 @@ async def signup(user_data: UserSignup):
     except HTTPException:
         raise
     except Exception as e:
+        print(f"Detailed signup error: {str(e)}")  # Add more detailed logging
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Registration failed: {str(e)}"
@@ -523,6 +497,179 @@ async def get_current_user_info(current_user: dict = Depends(get_authenticated_u
         }
     }
 
+@app.post("/auth/mfa/setup")
+async def setup_mfa(current_user: dict = Depends(get_authenticated_user)):
+    try:
+        user_email = current_user["email"]
+        
+        if db.is_mfa_enabled(user_email):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="MFA is already enabled"
+            )
+
+        from utils.key_func import generate_mfa_secret
+        secret = generate_mfa_secret()
+        
+        success = db.create_mfa_secret(user_email, secret)
+        if not success:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to setup MFA"
+            )
+
+        return {
+            "secret": secret,
+            "manual_entry_key": secret
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"MFA setup failed: {str(e)}"
+        )
+
+@app.post("/auth/mfa/verify")
+async def verify_mfa_setup(
+    request: MFAVerifyRequest,
+    current_user: dict = Depends(get_authenticated_user)
+):
+    try:
+        user_email = current_user["email"]
+        secret = db.get_mfa_secret(user_email)
+        
+        if not secret:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="MFA not set up"
+            )
+
+        from utils.key_func import verify_mfa_token, generate_backup_codes
+        if not verify_mfa_token(secret, request.token):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid MFA token"
+            )
+
+        backup_codes = generate_backup_codes()
+        backup_codes_str = ','.join(backup_codes)
+        
+        db.enable_mfa(user_email)
+        db.store_backup_codes(user_email, backup_codes_str)
+
+        return {
+            "message": "MFA enabled successfully",
+            "backup_codes": backup_codes
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"MFA verification failed: {str(e)}"
+        )
+
+@app.post("/auth/mfa/login")
+async def mfa_login(request: MFALoginRequest):
+    try:
+        user = db.authenticate_user(request.email, request.password)
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Incorrect email or password"
+            )
+
+        if not db.is_mfa_enabled(request.email):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="MFA not enabled for this account"
+            )
+
+        secret = db.get_mfa_secret(request.email)
+        from utils.key_func import verify_mfa_token
+        
+        token_valid = verify_mfa_token(secret, request.mfa_token)
+        backup_valid = db.use_backup_code(request.email, request.mfa_token)
+        
+        if not (token_valid or backup_valid):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid MFA token"
+            )
+
+        access_token = create_access_token_with_mfa(
+            data={"sub": user["email"], "mfa_verified": True}
+        )
+        
+        return {
+            "access_token": access_token,
+            "token_type": "bearer",
+            "user": {
+                "id": user["id"],
+                "email": user["email"],
+                "created_at": user["created_at"]
+            }
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"MFA login failed: {str(e)}"
+        )
+
+@app.post("/auth/mfa/disable")
+async def disable_mfa(
+    request: MFADisableRequest,
+    current_user: dict = Depends(get_authenticated_user)
+):
+    try:
+        user_email = current_user["email"]
+        
+        user = db.authenticate_user(user_email, request.password)
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Incorrect password"
+            )
+
+        success = db.disable_mfa(user_email)
+        if not success:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to disable MFA"
+            )
+
+        return {"message": "MFA disabled successfully"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"MFA disable failed: {str(e)}"
+        )
+
+@app.get("/auth/mfa/status")
+async def get_mfa_status(current_user: dict = Depends(get_authenticated_user)):
+    try:
+        user_email = current_user["email"]
+        is_enabled = db.is_mfa_enabled(user_email)
+        
+        return {
+            "mfa_enabled": is_enabled
+        }
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get MFA status: {str(e)}"
+        )
+
 # Add this import at the top of your main.py
 import base64
 
@@ -643,6 +790,7 @@ async def chat_endpoint(
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 # Updated analyze-outfit endpoint
+# Updated analyze-outfit endpoint
 @app.post("/analyze-outfit/")
 async def analyze_outfit(
     video: UploadFile = File(...),
@@ -652,16 +800,14 @@ async def analyze_outfit(
         # Get or create user profile for outfit analysis
         user_email = current_user["email"]
         
-        # Try to find existing user profile by email
-        # This is a simplified approach - you might want to add a proper lookup method
-        existing_scans = db.get_user_scans("")  # Get all scans to find user_id
-        user_id = None
+        # Use the helper function to get or create user profile
+        user_id = get_or_create_user_profile(db, user_email)
         
-        # Create a new user profile if none exists
-        # In a better implementation, you'd create this during signup
         if not user_id:
-            user_id = str(uuid.uuid4())
-            db.create_user(user_id, user_email)
+            return JSONResponse(
+                status_code=500, 
+                content={"error": "Failed to create or find user profile"}
+            )
 
         # Generate unique scan ID
         scan_id = str(uuid.uuid4())
@@ -840,7 +986,8 @@ async def analyze_outfit(
             "fit_line": fit_line,
             "stylist_says": stylist_says,
             "what_went_wrong": what_went_wrong,
-            "numeric_score": numeric_score
+            "numeric_score": numeric_score,
+            "user_id": user_id  # Include user_id in response for debugging
         }
         
         # Add audio data if generation was successful
@@ -854,6 +1001,9 @@ async def analyze_outfit(
         return response_data
 
     except Exception as e:
+        print(f"Error in analyze_outfit: {e}")
+        import traceback
+        traceback.print_exc()
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 # New endpoint to serve audio files
@@ -885,6 +1035,280 @@ async def get_current_user_scans(current_user: dict = Depends(get_authenticated_
         
         return {"scans": all_scans}
     except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+# Scan History Endpoints
+
+# Replace your existing /user/scans-with-history/ endpoint with this fixed version
+
+@app.get("/user/scans-with-history/")
+async def get_user_scans_with_history(current_user: dict = Depends(get_authenticated_user)):
+    """Get all scans for the current user along with their chat history"""
+    try:
+        user_email = current_user["email"]
+        print(f"Looking for scans for user: {user_email}")
+        
+        user_profile = db.get_user_by_email(user_email)
+        if not user_profile:
+            return JSONResponse(status_code=404, content={"error": "User not found"})
+
+        user_id = user_profile["id"]
+        print(f"Found user profile with ID: {user_id}")
+        
+        # Fetch scans for the user_id
+        scans_query = """
+            SELECT id, user_id, video_path, image_paths, score, feedback, created_at 
+            FROM scans 
+            WHERE user_id = %s
+            ORDER BY created_at DESC
+        """
+        try:
+            user_scans = []
+            cursor = db.connection.cursor()
+            cursor.execute(scans_query, (user_id,))
+            scan_columns = [desc[0] for desc in cursor.description]
+            scan_rows = cursor.fetchall()
+            cursor.close()
+
+            for scan_row in scan_rows:
+                scan = dict(zip(scan_columns, scan_row))
+                print(f"Found scan: {scan['id']}")
+                
+                # Get chat history
+                chat_history = db.get_chat_history(scan["id"])
+                print(f"Found {len(chat_history)} chat messages for scan {scan['id']}")
+                
+                # Debug: Print the structure of the first chat message to see available fields
+                if chat_history:
+                    print(f"Sample chat message structure: {list(chat_history[0].keys())}")
+
+                # Parse analysis
+                analysis_data = {}
+                if scan.get("feedback"):
+                    try:
+                        cleaned_feedback = scan["feedback"].strip()
+                        if cleaned_feedback.startswith('```json'):
+                            cleaned_feedback = cleaned_feedback[7:]
+                        if cleaned_feedback.endswith('```'):
+                            cleaned_feedback = cleaned_feedback[:-3]
+                        cleaned_feedback = cleaned_feedback.strip()
+                        
+                        parsed_feedback = json.loads(cleaned_feedback)
+                        analysis_data = {
+                            "score": parsed_feedback.get("score", f"{scan['score']}/100" if scan['score'] else "N/A"),
+                            "fit_line": parsed_feedback.get("fit_line", ""),
+                            "stylist_says": parsed_feedback.get("stylist_says", ""),
+                            "what_went_wrong": parsed_feedback.get("what_went_wrong", "")
+                        }
+                    except json.JSONDecodeError:
+                        analysis_data = {
+                            "score": f"{scan['score']}/100" if scan['score'] else "N/A",
+                            "fit_line": "",
+                            "stylist_says": scan.get("feedback", ""),
+                            "what_went_wrong": ""
+                        }
+
+                # Parse image paths
+                image_paths = []
+                if scan.get("image_paths"):
+                    try:
+                        image_paths = (
+                            json.loads(scan["image_paths"])
+                            if isinstance(scan["image_paths"], str)
+                            else scan["image_paths"]
+                        )
+                    except:
+                        image_paths = []
+
+                # Format chat history with flexible field handling
+                formatted_chat_history = []
+                for msg in chat_history:
+                    if msg["role"] != "system":  # Filter out system messages
+                        # Handle different possible timestamp field names
+                        timestamp = None
+                        for time_field in ['timestamp', 'created_at', 'date_created', 'time']:
+                            if time_field in msg and msg[time_field]:
+                                timestamp = msg[time_field]
+                                break
+                        
+                        # If no timestamp found, use current time or scan creation time as fallback
+                        if not timestamp:
+                            timestamp = scan["created_at"]
+                        
+                        formatted_msg = {
+                            "id": msg.get("id", ""),
+                            "role": msg["role"],
+                            "message": msg["message"],
+                            "timestamp": timestamp
+                        }
+                        formatted_chat_history.append(formatted_msg)
+
+                # Determine last activity - use the latest timestamp from chat or scan creation
+                last_activity = scan["created_at"]  # Default fallback
+                if formatted_chat_history:
+                    try:
+                        # Try to find the most recent timestamp
+                        chat_timestamps = [msg["timestamp"] for msg in formatted_chat_history if msg["timestamp"]]
+                        if chat_timestamps:
+                            last_activity = max(chat_timestamps)
+                    except Exception as e:
+                        print(f"Error determining last activity: {e}")
+                        # Keep the default fallback
+
+                scan_data = {
+                    "scan_id": scan["id"],
+                    "created_at": scan["created_at"],
+                    "numeric_score": scan["score"],
+                    "video_path": scan["video_path"],
+                    "image_paths": image_paths,
+                    "analysis": analysis_data,
+                    "chat_history": formatted_chat_history,
+                    "total_messages": len(formatted_chat_history),
+                    "last_activity": last_activity
+                }
+
+                user_scans.append(scan_data)
+
+            # Sort by recent activity (handle potential datetime comparison issues)
+            try:
+                user_scans.sort(key=lambda x: x["last_activity"], reverse=True)
+            except Exception as e:
+                print(f"Error sorting scans by last_activity: {e}")
+                # Fallback: sort by created_at
+                user_scans.sort(key=lambda x: x["created_at"], reverse=True)
+
+            return {
+                "user_email": user_email,
+                "total_scans": len(user_scans),
+                "scans": user_scans
+            }
+
+        except Exception as e:
+            print(f"Error querying database: {e}")
+            import traceback
+            traceback.print_exc()
+            return JSONResponse(status_code=500, content={"error": f"Database query failed: {str(e)}"})
+
+    except Exception as e:
+        print(f"Error getting user scans with history: {e}")
+        import traceback
+        traceback.print_exc()
+        return JSONResponse(status_code=500, content={"error": str(e)})
+    
+# Also, you need to fix the analyze-outfit endpoint to properly link users
+# Add this helper function to find or create user profile
+
+def get_or_create_user_profile(db, user_email):
+    """Get existing user profile or create a new one"""
+    try:
+        query = "SELECT * FROM users WHERE email = %s"
+        cursor = db.connection.cursor()
+        cursor.execute(query, (user_email,))
+        columns = [desc[0] for desc in cursor.description]
+        result = cursor.fetchone()
+        cursor.close()
+
+        if result:
+            user_profile = dict(zip(columns, result))
+            print(f"Found existing user profile: {user_profile['id']}")
+            return user_profile["id"]
+        else:
+            user_id = str(uuid.uuid4())
+            success = db.create_user(user_id, user_email)
+            if success:
+                print(f"Created new user profile: {user_id}")
+                return user_id
+            else:
+                print("Failed to create user profile")
+                return None
+
+    except Exception as e:
+        print(f"Error in get_or_create_user_profile: {e}")
+        return None
+
+
+
+@app.get("/user/scans-with-history-optimized/")
+async def get_user_scans_with_history_optimized(current_user: dict = Depends(get_authenticated_user)):
+    """Optimized version - gets user scans with history using proper user lookup"""
+    try:
+        user_email = current_user["email"]
+        
+        # Get user_id from users table by email
+        user_profile = db.get_user_by_email(user_email)  # You'll need to implement this
+        if not user_profile:
+            return {
+                "user_email": user_email,
+                "total_scans": 0,
+                "scans": [],
+                "message": "No user profile found"
+            }
+        
+        user_id = user_profile["id"]
+        
+        # Get all scans for this user
+        user_scans_raw = db.get_user_scans(user_id)
+        
+        user_scans = []
+        for scan in user_scans_raw:
+            # Get chat history for this scan
+            chat_history = db.get_chat_history(scan["id"])
+            
+            # Parse the original analysis from the feedback
+            analysis_data = {}
+            if scan.get("feedback"):
+                try:
+                    parsed_feedback = json.loads(scan["feedback"])
+                    analysis_data = {
+                        "score": parsed_feedback.get("score", f"{scan['score']}/100" if scan['score'] else "N/A"),
+                        "fit_line": parsed_feedback.get("fit_line", ""),
+                        "stylist_says": parsed_feedback.get("stylist_says", ""),
+                        "what_went_wrong": parsed_feedback.get("what_went_wrong", "")
+                    }
+                except:
+                    analysis_data = {
+                        "score": f"{scan['score']}/100" if scan['score'] else "N/A",
+                        "fit_line": "",
+                        "stylist_says": scan.get("feedback", ""),
+                        "what_went_wrong": ""
+                    }
+            
+            # Format the scan data
+            scan_data = {
+                "scan_id": scan["id"],
+                "created_at": scan["created_at"],
+                "numeric_score": scan["score"],
+                "video_path": scan["video_path"],
+                "image_paths": scan.get("image_paths", []),
+                "analysis": analysis_data,
+                "chat_history": [
+                    {
+                        "id": msg["id"],
+                        "role": msg["role"],
+                        "message": msg["message"],
+                        "timestamp": msg["timestamp"]
+                    }
+                    for msg in chat_history
+                    if msg["role"] != "system"  # Filter out system messages for cleaner history
+                ],
+                "total_messages": len([msg for msg in chat_history if msg["role"] != "system"]),
+                "last_activity": chat_history[-1]["timestamp"] if chat_history else scan["created_at"]
+            }
+            
+            user_scans.append(scan_data)
+        
+        # Sort by last activity (most recent first)
+        user_scans.sort(key=lambda x: x["last_activity"], reverse=True)
+        
+        return {
+            "user_id": user_id,
+            "user_email": user_email,
+            "total_scans": len(user_scans),
+            "scans": user_scans
+        }
+        
+    except Exception as e:
+        print(f"Error getting user scans with history: {e}")
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 @app.get("/scan/{scan_id}/history/")

@@ -50,7 +50,6 @@ def get_optional_current_user(credentials: Optional[HTTPAuthorizationCredentials
         return None
 
 def get_authenticated_user(credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)):
-    """Get authenticated user with database instance"""
     if not credentials:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -59,12 +58,20 @@ def get_authenticated_user(credentials: Optional[HTTPAuthorizationCredentials] =
         )
     
     token = credentials.credentials
-    email = get_current_user_email(token)
+    payload = verify_token(token)
     
-    if not email:
+    if not payload:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    email = payload.get("sub")
+    if not email:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token payload",
             headers={"WWW-Authenticate": "Bearer"},
         )
     
@@ -74,6 +81,13 @@ def get_authenticated_user(credentials: Optional[HTTPAuthorizationCredentials] =
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="User not found",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    if payload.get("mfa_required") and not payload.get("mfa_verified"):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="MFA verification required",
             headers={"WWW-Authenticate": "Bearer"},
         )
     

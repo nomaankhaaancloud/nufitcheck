@@ -41,4 +41,3 @@ if __name__ == "__main__":
     video_file = '/home/ca/Downloads/NuFitCheck_test/videoplayback.mp4'
     output_folder = 'extracted_frames'
     extract_frames(video_file, output_folder)
-
