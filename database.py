@@ -13,7 +13,7 @@ class DatabaseManager:
             'host': os.getenv('DB_HOST', 'localhost'),
             'database': os.getenv('DB_NAME', 'nufitcheck'),
             'user': os.getenv('DB_USER', 'postgres'),
-            'password': os.getenv('DB_PASSWORD', 'password'),
+            'password': os.getenv('DB_PASSWORD', '1234'),
             'port': os.getenv('DB_PORT', '5432')
         }
         self.connection = None
@@ -831,25 +831,3 @@ class DatabaseManager:
         except Exception as e:
             print(f"Error getting user by email: {e}")
             return None
-
-
-    # Legacy methods for backward compatibility (remove after migration)
-    def create_password_reset_token(self, email: str, token: str, expires_at: datetime) -> bool:
-        """Legacy method - use create_password_reset_code instead"""
-        print("Warning: create_password_reset_token is deprecated, use create_password_reset_code")
-        return self.create_password_reset_code(email, token, expires_at)
-
-    def verify_password_reset_token(self, token: str) -> Optional[str]:
-        """Legacy method - use verify_password_reset_code instead"""
-        print("Warning: verify_password_reset_token is deprecated, use verify_password_reset_code")
-        return self.verify_password_reset_code(token)
-
-    def mark_token_as_used(self, token: str) -> bool:
-        """Legacy method - use mark_code_as_used instead"""
-        print("Warning: mark_token_as_used is deprecated, use mark_code_as_used")
-        return self.mark_code_as_used(token)
-
-    def cleanup_expired_tokens(self):
-        """Legacy method - use cleanup_expired_codes instead"""
-        print("Warning: cleanup_expired_tokens is deprecated, use cleanup_expired_codes")
-        return self.cleanup_expired_codes()

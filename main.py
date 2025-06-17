@@ -18,6 +18,10 @@ from utils.key_func import create_access_token, generate_4_digit_code, create_ac
 from utils.voiceagent import generate_audio
 from dotenv import load_dotenv
 import base64
+from utils.key_func import SECRET_KEY, ALGORITHM
+import jwt
+from jwt import PyJWTError as JWTError  # or simply: from jwt import ExpiredSignatureError, InvalidTokenError
+
 
 load_dotenv()
 
@@ -74,6 +78,9 @@ class MFAVerifyRequest(BaseModel):
 class MFALoginRequest(BaseModel):
     email: EmailStr
     password: str
+
+class MFATokenVerifyRequest(BaseModel):
+    temp_token: str
     mfa_token: str
 
 class MFADisableRequest(BaseModel):
@@ -573,7 +580,8 @@ async def verify_mfa_setup(
         )
 
 @app.post("/auth/mfa/login")
-async def mfa_login(request: MFALoginRequest):
+async def mfa_login_step1(request: MFALoginRequest):
+    """Step 1: Validate email/password and return temporary token for MFA verification"""
     try:
         user = db.authenticate_user(request.email, request.password)
         if not user:
@@ -588,11 +596,60 @@ async def mfa_login(request: MFALoginRequest):
                 detail="MFA not enabled for this account"
             )
 
-        secret = db.get_mfa_secret(request.email)
+        # Create a temporary token for MFA verification (short expiry)
+        temp_token = create_temp_mfa_token(
+            data={"sub": user["email"], "purpose": "mfa_verification"}
+        )
+        
+        return {
+            "temp_token": temp_token,
+            "message": "Email and password verified. Please provide MFA token.",
+            "requires_mfa": True
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"MFA login step 1 failed: {str(e)}"
+        )
+
+@app.post("/auth/mfa/verify-token")
+async def mfa_login_step2(request: MFATokenVerifyRequest):
+    """Step 2: Verify MFA token and return access token"""
+    try:
+        # Verify the temporary token
+        try:
+            payload = jwt.decode(request.temp_token, SECRET_KEY, algorithms=[ALGORITHM])
+            email = payload.get("sub")
+            purpose = payload.get("purpose")
+            
+            if purpose != "mfa_verification":
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Invalid temporary token"
+                )
+        except JWTError:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid or expired temporary token"
+            )
+
+        # Get user and MFA secret
+        user = db.get_user_by_email(email)
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="User not found"
+            )
+
+        secret = db.get_mfa_secret(email)
         from utils.key_func import verify_mfa_token
         
+        # Verify MFA token or backup code
         token_valid = verify_mfa_token(secret, request.mfa_token)
-        backup_valid = db.use_backup_code(request.email, request.mfa_token)
+        backup_valid = db.use_backup_code(email, request.mfa_token)
         
         if not (token_valid or backup_valid):
             raise HTTPException(
@@ -600,6 +657,7 @@ async def mfa_login(request: MFALoginRequest):
                 detail="Invalid MFA token"
             )
 
+        # Create final access token
         access_token = create_access_token_with_mfa(
             data={"sub": user["email"], "mfa_verified": True}
         )
@@ -619,8 +677,21 @@ async def mfa_login(request: MFALoginRequest):
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"MFA login failed: {str(e)}"
+            detail=f"MFA token verification failed: {str(e)}"
         )
+
+# You'll also need to add this utility function for creating temporary tokens
+def create_temp_mfa_token(data: dict, expires_delta: timedelta = None):
+    """Create a temporary token for MFA verification (short-lived)"""
+    if expires_delta:
+        expire = datetime.utcnow() + expires_delta
+    else:
+        expire = datetime.utcnow() + timedelta(minutes=5)  # 5 minute expiry
+    
+    to_encode = data.copy()
+    to_encode.update({"exp": expire})
+    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return encoded_jwt
 
 @app.post("/auth/mfa/disable")
 async def disable_mfa(
