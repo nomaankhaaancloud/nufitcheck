@@ -616,27 +616,78 @@ class DatabaseManager:
             print(f"Error getting user: {e}")
             return None
 
+    # Updated database.py methods
+
     def create_scan(self, scan_id: str, user_id: str, video_path: str, 
-                   image_paths: List[str], score: Optional[int], feedback: str) -> bool:
-        """Create a new scan"""
+                image_paths: List[str], individual_scores: List[int], 
+                feedback: str) -> bool:
+        """Create a new scan with support for multiple user scores"""
         try:
             if not self.connect():
                 print(f"Failed to connect to database for scan {scan_id}")
                 return False
                 
             cursor = self.connection.cursor()
+            
+            # Store individual scores as JSON array
+            individual_scores_json = json.dumps(individual_scores) if individual_scores else None
+            
             cursor.execute(
-                """INSERT INTO scans (id, user_id, video_path, image_paths, score, feedback) 
-                   VALUES (%s, %s, %s, %s, %s, %s)""",
-                (scan_id, user_id, video_path, json.dumps(image_paths), score, feedback)
+                """INSERT INTO scans (id, user_id, video_path, image_paths, 
+                                    individual_scores, feedback) 
+                VALUES (%s, %s, %s, %s, %s, %s)""",
+                (scan_id, user_id, video_path, json.dumps(image_paths), 
+                individual_scores_json, feedback)
             )
             cursor.close()
-            print(f"Scan {scan_id} created successfully")
+            print(f"Scan {scan_id} created successfully with {len(individual_scores) if individual_scores else 0} individual scores")
             return True
             
         except Exception as e:
             print(f"Error creating scan {scan_id}: {e}")
             return False
+
+    # If you need to maintain backward compatibility, you can also add this method:
+    def create_scan_legacy(self, scan_id: str, user_id: str, video_path: str, 
+                        image_paths: List[str], score: Optional[int], feedback: str) -> bool:
+        """Legacy method for backward compatibility - converts single score to list"""
+        individual_scores = [score] if score is not None else []
+        return self.create_scan(scan_id, user_id, video_path, image_paths, 
+                            individual_scores, feedback)
+
+    # Method to retrieve scan with multiple scores
+    def get_scan_details(self, scan_id: str) -> Optional[dict]:
+        """Get detailed scan information including all scores"""
+        try:
+            if not self.connect():
+                return None
+                
+            cursor = self.connection.cursor()
+            cursor.execute(
+                """SELECT id, user_id, video_path, image_paths, individual_scores, 
+                        feedback, created_at 
+                FROM scans WHERE id = %s""",
+                (scan_id,)
+            )
+            
+            result = cursor.fetchone()
+            cursor.close()
+            
+            if result:
+                return {
+                    "scan_id": result[0],
+                    "user_id": result[1], 
+                    "video_path": result[2],
+                    "image_paths": json.loads(result[3]) if result[3] else [],
+                    "individual_scores": json.loads(result[4]) if result[4] else [],
+                    "feedback": result[5],
+                    "created_at": result[6]
+                }
+            return None
+            
+        except Exception as e:
+            print(f"Error getting scan details {scan_id}: {e}")
+            return None
 
     def get_scan(self, scan_id: str) -> Optional[Dict]:
         """Get scan by ID"""

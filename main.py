@@ -914,15 +914,30 @@ async def analyze_outfit(
             "content": (
                 "You are NuFit — a fun, stylish fashion AI that gives punchy feedback and outfit ratings.\n"
                 "Speak like a cool cousin — fun, honest, and baby-simple.\n\n"
-                
+
                 "INITIAL OUTFIT ANALYSIS MODE:\n"
-                "When analyzing outfit images for the first time, respond ONLY with valid JSON format:\n\n"
+                "When analyzing outfit images, check how many people are present:\n\n"
+                
+                "FOR SINGLE PERSON:\n"
+                "Return a JSON object WITHOUT position labels:\n"
                 "{\n"
-                "  \"score\": \"e.g., 78/100\",\n"
-                "  \"fit_line\": \"1–2 fun spoken lines for ElevenLabs (no \\n)\",\n"
-                "  \"stylist_says\": \"3-4 line outfit feedback\",\n"
-                "  \"what_went_wrong\": \"3-4 lines of what could be better\"\n"
+                "  \"score\": \"89/100\",\n"
+                "  \"fit_line\": \"Cozy vibes with a chic twist.\",\n"
+                "  \"stylist_says\": \"Loving the comfy joggers paired with a sleek crop top—perfect balance!\",\n"
+                "  \"what_went_wrong\": \"Could use some standout accessories or shoes to elevate the look.\"\n"
                 "}\n\n"
+                
+                "FOR MULTIPLE PEOPLE (2-3 people):\n"
+                "Label them as 'Left', 'Middle', and 'Right' based on their position in the image.\n"
+                "Return a JSON object WITH position labels:\n"
+                "{\n"
+                "  \"score\": \"Left: 89/100, Middle: 78/100, Right: 82/100\",\n"
+                "  \"fit_line\": \"Left: ..., Middle: ..., Right: ...\",\n"
+                "  \"stylist_says\": \"Left: ..., Middle: ..., Right: ...\",\n"
+                "  \"what_went_wrong\": \"Left: ..., Middle: ..., Right: ...\"\n"
+                "}\n\n"
+                
+                "All values must be in one JSON object only — no nested or separate person objects.\n"
                 
                 "Scoring Rules:\n"
                 "• Matching tones: +10\n"
@@ -945,7 +960,7 @@ async def analyze_outfit(
                 "• Be encouraging but honest\n"
                 "• Use casual, friendly language\n"
                 "• Reference their previous outfit analysis when relevant\n"
-                "If user asks anything unrealted to fashion or styling tips, tell user to stick to the topic\n\n"
+                "If user asks anything unrelated to fashion or styling tips, tell user to stick to the topic\n\n"
                 
                 "IMPORTANT: For initial outfit analysis, return ONLY the JSON object (no markdown, no code blocks). For follow-up chat, respond naturally as NuFit."
             )
@@ -977,9 +992,11 @@ async def analyze_outfit(
         if not reply:
             return JSONResponse(status_code=500, content={"error": "Failed to get outfit analysis"})
 
+        # Updated main.py endpoint section (replace the JSON parsing section)
+
         # Parse JSON response from GPT
         import re
-        
+
         try:
             # Clean the response by removing markdown code blocks if present
             cleaned_reply = reply.strip()
@@ -992,27 +1009,33 @@ async def analyze_outfit(
             # Parse JSON
             parsed_response = json.loads(cleaned_reply)
             
-            # Extract individual components - using "score" instead of "fit_score"
+            # Extract individual components
             score = parsed_response.get("score", "N/A")
             fit_line = parsed_response.get("fit_line", "")
             stylist_says = parsed_response.get("stylist_says", "")
             what_went_wrong = parsed_response.get("what_went_wrong", "")
             
-            # Extract numeric score for database
-            score_match = re.search(r'(\d+)/100', score)
-            numeric_score = int(score_match.group(1)) if score_match else None
+            # Extract all numeric scores
+            score_matches = re.findall(r'(\d+)/100', score)
+            if score_matches:
+                individual_scores = [int(match) for match in score_matches]
+            else:
+                individual_scores = []
             
         except (json.JSONDecodeError, KeyError) as e:
             print(f"JSON parsing error: {e}")
             print(f"Raw reply: {reply}")
             
-            # Fallback: extract score from raw reply and use original format
-            score_match = re.search(r'(\d+)/100', reply)
-            numeric_score = int(score_match.group(1)) if score_match else None
+            # Fallback: extract scores from raw reply
+            score_matches = re.findall(r'(\d+)/100', reply)
+            if score_matches:
+                individual_scores = [int(match) for match in score_matches]
+            else:
+                individual_scores = []
             
             # Return in original format as fallback
             parsed_response = {
-                "score": f"{numeric_score}/100" if numeric_score else "N/A",
+                "score": f"{individual_scores[0]}/100" if individual_scores else "N/A",
                 "fit_line": "Analysis complete!",
                 "stylist_says": reply[:100] + "..." if len(reply) > 100 else reply,
                 "what_went_wrong": "Could not parse detailed feedback"
@@ -1022,14 +1045,14 @@ async def analyze_outfit(
             stylist_says = parsed_response["stylist_says"]
             what_went_wrong = parsed_response["what_went_wrong"]
 
-        # Create scan record in database
+        # Create scan record in database with individual scores
         scan_success = db.create_scan(
             scan_id=scan_id,
             user_id=user_id,
             video_path=video_path,
             image_paths=frame_paths,
-            score=numeric_score,
-            feedback=reply  # Store original response for reference
+            individual_scores=individual_scores,  # Pass list of individual scores
+            feedback=reply
         )
 
         if not scan_success:
@@ -1041,10 +1064,10 @@ async def analyze_outfit(
             "You previously analyzed this user's outfit. Continue the conversation naturally, "
             "giving styling tips, answering fashion questions, and being encouraging but honest."
         )
-        
+
         db.add_chat_message(scan_id, "system", chat_system_message)
         db.add_chat_message(scan_id, "user", user_text_message["content"])
-        db.add_chat_message(scan_id, "user", "Analyze uploaded outfit images")  # Simplified version of image message
+        db.add_chat_message(scan_id, "user", "Analyze uploaded outfit images")
         db.add_chat_message(scan_id, "assistant", reply)
 
         # Generate audio for the analysis response (base64)
@@ -1057,10 +1080,11 @@ async def analyze_outfit(
             "fit_line": fit_line,
             "stylist_says": stylist_says,
             "what_went_wrong": what_went_wrong,
-            "numeric_score": numeric_score,
-            "user_id": user_id  # Include user_id in response for debugging
+            "individual_scores": individual_scores,  # List of all individual scores
+            "total_people": len(individual_scores) if individual_scores else 1,
+            "user_id": user_id
         }
-        
+
         # Add audio data if generation was successful
         if audio_data:
             response_data.update({
