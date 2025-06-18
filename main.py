@@ -862,6 +862,246 @@ async def chat_endpoint(
 
 # Updated analyze-outfit endpoint
 # Updated analyze-outfit endpoint
+# @app.post("/analyze-outfit/")
+# async def analyze_outfit(
+#     video: UploadFile = File(...),
+#     current_user: dict = Depends(get_authenticated_user)
+# ):
+#     try:
+#         # Get or create user profile for outfit analysis
+#         user_email = current_user["email"]
+        
+#         # Use the helper function to get or create user profile
+#         user_id = get_or_create_user_profile(db, user_email)
+        
+#         if not user_id:
+#             return JSONResponse(
+#                 status_code=500, 
+#                 content={"error": "Failed to create or find user profile"}
+#             )
+
+#         # Generate unique scan ID
+#         scan_id = str(uuid.uuid4())
+        
+#         # Save video to disk
+#         video_filename = f"{scan_id}_{video.filename}"
+#         video_path = os.path.join(UPLOAD_DIR, video_filename)
+#         with open(video_path, "wb") as buffer:
+#             shutil.copyfileobj(video.file, buffer)
+
+#         # Create scan-specific frame directory
+#         scan_frame_dir = os.path.join(FRAME_DIR, scan_id)
+#         os.makedirs(scan_frame_dir, exist_ok=True)
+
+#         # Extract frames
+#         extract_frames(video_path, scan_frame_dir)
+
+#         # Load image messages (max 5)
+#         image_messages = load_image_messages(scan_frame_dir)
+#         if not image_messages:
+#             return JSONResponse(status_code=400, content={"error": "No frames extracted."})
+
+#         # Get frame paths for database storage
+#         frame_paths = []
+#         image_extensions = (".jpg", ".jpeg", ".png")
+#         for filename in sorted(os.listdir(scan_frame_dir))[:5]:
+#             if filename.lower().endswith(image_extensions):
+#                 frame_paths.append(os.path.join(scan_frame_dir, filename))
+
+#         # Updated system message to handle both analysis and chat
+#         system_message = {
+#             "role": "system",
+#             "content": (
+#                 "You are NuFit — a fun, stylish fashion AI that gives punchy feedback and outfit ratings.\n"
+#                 "Speak like a cool cousin — fun, honest, and baby-simple.\n\n"
+
+#                 "INITIAL OUTFIT ANALYSIS MODE:\n"
+#                 "When analyzing outfit images, check how many people are present:\n\n"
+                
+#                 "FOR SINGLE PERSON:\n"
+#                 "Return a JSON object WITHOUT position labels:\n"
+#                 "{\n"
+#                 "  \"score\": \"89/100\",\n"
+#                 "  \"fit_line\": \"Cozy vibes with a chic twist.\",\n"
+#                 "  \"stylist_says\": \"Loving the comfy joggers paired with a sleek crop top—perfect balance!\",\n"
+#                 "  \"what_went_wrong\": \"Could use some standout accessories or shoes to elevate the look.\"\n"
+#                 "}\n\n"
+                
+#                 "FOR MULTIPLE PEOPLE (2-3 people):\n"
+#                 "Label them as 'Left', 'Middle', and 'Right' based on their position in the image.\n"
+#                 "Return a JSON object WITH position labels:\n"
+#                 "{\n"
+#                 "  \"score\": \"Left: 89/100, Middle: 78/100, Right: 82/100\",\n"
+#                 "  \"fit_line\": \"Left: ..., Middle: ..., Right: ...\",\n"
+#                 "  \"stylist_says\": \"Left: ..., Middle: ..., Right: ...\",\n"
+#                 "  \"what_went_wrong\": \"Left: ..., Middle: ..., Right: ...\"\n"
+#                 "}\n\n"
+                
+#                 "All values must be in one JSON object only — no nested or separate person objects.\n"
+                
+#                 "Scoring Rules:\n"
+#                 "• Matching tones: +10\n"
+#                 "• Contradicting styles: -10\n"
+#                 "• >3 bold colors: -5\n"
+#                 "• No shoes: -15\n"
+#                 "• Slides/formals mismatch: -20\n"
+#                 "• Matching top & bottom: +15\n"
+#                 "• Shoes match outfit: +10\n"
+#                 "• Fits the event: +10\n"
+#                 "• Clashing colors (e.g. red+orange): -10\n\n"
+                
+#                 "Adjust with fashion sense if rules are broken but the outfit still slays or follows rules but looks boring.\n\n"
+                
+#                 "CHAT MODE:\n"
+#                 "After the initial analysis, respond naturally in conversation. Keep your cool cousin personality:\n"
+#                 "• Give styling tips and advice\n"
+#                 "• Answer questions about fashion, colors, trends\n"
+#                 "• Suggest outfit improvements or alternatives\n"
+#                 "• Be encouraging but honest\n"
+#                 "• Use casual, friendly language\n"
+#                 "• Reference their previous outfit analysis when relevant\n"
+#                 "If user asks anything unrelated to fashion or styling tips, tell user to stick to the topic\n\n"
+                
+#                 "IMPORTANT: For initial outfit analysis, return ONLY the JSON object (no markdown, no code blocks). For follow-up chat, respond naturally as NuFit."
+#             )
+#         }
+
+#         user_text_message = {
+#             "role": "user",
+#             "content": "Please analyze the following outfit images using NuFit style rules and give me my FitScore and tips!"
+#         }
+
+#         user_image_message = {
+#             "role": "user",
+#             "content": [
+#                 {
+#                     "type": "text",
+#                     "text": (
+#                         "Assume the person's gender presentation from the image. Use NuFit JSON format for analysis: "
+#                         "score, fit_line, stylist_says, what_went_wrong. Keep it short and voice-friendly! "
+#                         "Return only valid JSON, no markdown formatting."
+#                     )
+#                 }
+#             ] + image_messages
+#         }
+
+#         # Compose message list and get response
+#         messages = [system_message, user_text_message, user_image_message]
+#         reply = chat_with_gpt(messages)
+
+#         if not reply:
+#             return JSONResponse(status_code=500, content={"error": "Failed to get outfit analysis"})
+
+#         # Updated main.py endpoint section (replace the JSON parsing section)
+
+#         # Parse JSON response from GPT
+#         import re
+
+#         try:
+#             # Clean the response by removing markdown code blocks if present
+#             cleaned_reply = reply.strip()
+#             if cleaned_reply.startswith('```json'):
+#                 cleaned_reply = cleaned_reply[7:]  # Remove ```json
+#             if cleaned_reply.endswith('```'):
+#                 cleaned_reply = cleaned_reply[:-3]  # Remove ```
+#             cleaned_reply = cleaned_reply.strip()
+            
+#             # Parse JSON
+#             parsed_response = json.loads(cleaned_reply)
+            
+#             # Extract individual components
+#             score = parsed_response.get("score", "N/A")
+#             fit_line = parsed_response.get("fit_line", "")
+#             stylist_says = parsed_response.get("stylist_says", "")
+#             what_went_wrong = parsed_response.get("what_went_wrong", "")
+            
+#             # Extract all numeric scores
+#             score_matches = re.findall(r'(\d+)/100', score)
+#             if score_matches:
+#                 individual_scores = [int(match) for match in score_matches]
+#             else:
+#                 individual_scores = []
+            
+#         except (json.JSONDecodeError, KeyError) as e:
+#             print(f"JSON parsing error: {e}")
+#             print(f"Raw reply: {reply}")
+            
+#             # Fallback: extract scores from raw reply
+#             score_matches = re.findall(r'(\d+)/100', reply)
+#             if score_matches:
+#                 individual_scores = [int(match) for match in score_matches]
+#             else:
+#                 individual_scores = []
+            
+#             # Return in original format as fallback
+#             parsed_response = {
+#                 "score": f"{individual_scores[0]}/100" if individual_scores else "N/A",
+#                 "fit_line": "Analysis complete!",
+#                 "stylist_says": reply[:100] + "..." if len(reply) > 100 else reply,
+#                 "what_went_wrong": "Could not parse detailed feedback"
+#             }
+#             score = parsed_response["score"]
+#             fit_line = parsed_response["fit_line"]
+#             stylist_says = parsed_response["stylist_says"]
+#             what_went_wrong = parsed_response["what_went_wrong"]
+
+#         # Create scan record in database with individual scores
+#         scan_success = db.create_scan(
+#             scan_id=scan_id,
+#             user_id=user_id,
+#             video_path=video_path,
+#             image_paths=frame_paths,
+#             individual_scores=individual_scores,  # Pass list of individual scores
+#             feedback=reply
+#         )
+
+#         if not scan_success:
+#             return JSONResponse(status_code=500, content={"error": "Failed to save scan data"})
+
+#         # Store initial chat messages with updated system message for future chats
+#         chat_system_message = (
+#             "You are NuFit — a fun, stylish fashion AI that gives punchy feedback and outfit ratings. "
+#             "You previously analyzed this user's outfit. Continue the conversation naturally, "
+#             "giving styling tips, answering fashion questions, and being encouraging but honest."
+#         )
+
+#         db.add_chat_message(scan_id, "system", chat_system_message)
+#         db.add_chat_message(scan_id, "user", user_text_message["content"])
+#         db.add_chat_message(scan_id, "user", "Analyze uploaded outfit images")
+#         db.add_chat_message(scan_id, "assistant", reply)
+
+#         # Generate audio for the analysis response (base64)
+#         audio_data = generate_response_audio_base64(reply, scan_id, "analysis")
+
+#         # Build response data
+#         response_data = {
+#             "scan_id": scan_id,
+#             "score": score,
+#             "fit_line": fit_line,
+#             "stylist_says": stylist_says,
+#             "what_went_wrong": what_went_wrong,
+#             "individual_scores": individual_scores,  # List of all individual scores
+#             "total_people": len(individual_scores) if individual_scores else 1,
+#             "user_id": user_id
+#         }
+
+#         # Add audio data if generation was successful
+#         if audio_data:
+#             response_data.update({
+#                 "audio_base64": audio_data["audio_base64"],
+#                 "audio_format": audio_data["audio_format"],
+#                 "audio_filename": audio_data["filename"]
+#             })
+
+#         return response_data
+
+#     except Exception as e:
+#         print(f"Error in analyze_outfit: {e}")
+#         import traceback
+#         traceback.print_exc()
+#         return JSONResponse(status_code=500, content={"error": str(e)})
+
+
 @app.post("/analyze-outfit/")
 async def analyze_outfit(
     video: UploadFile = File(...),
@@ -908,7 +1148,7 @@ async def analyze_outfit(
             if filename.lower().endswith(image_extensions):
                 frame_paths.append(os.path.join(scan_frame_dir, filename))
 
-        # Updated system message to handle both analysis and chat
+        # Updated system message to handle single person only
         system_message = {
             "role": "system",
             "content": (
@@ -916,28 +1156,23 @@ async def analyze_outfit(
                 "Speak like a cool cousin — fun, honest, and baby-simple.\n\n"
 
                 "INITIAL OUTFIT ANALYSIS MODE:\n"
-                "When analyzing outfit images, check how many people are present:\n\n"
+                "When analyzing outfit images, first check how many people are present:\n\n"
                 
-                "FOR SINGLE PERSON:\n"
-                "Return a JSON object WITHOUT position labels:\n"
+                "IF MORE THAN ONE PERSON IS DETECTED:\n"
+                "Return this exact JSON response:\n"
+                "{\n"
+                "  \"error\": \"multiple_people\",\n"
+                "  \"message\": \"More than one person detected. Cannot scan the outfit. Please ensure only one person is visible in the video.\"\n"
+                "}\n\n"
+                
+                "FOR SINGLE PERSON ONLY:\n"
+                "Return a JSON object with the outfit analysis:\n"
                 "{\n"
                 "  \"score\": \"89/100\",\n"
                 "  \"fit_line\": \"Cozy vibes with a chic twist.\",\n"
                 "  \"stylist_says\": \"Loving the comfy joggers paired with a sleek crop top—perfect balance!\",\n"
                 "  \"what_went_wrong\": \"Could use some standout accessories or shoes to elevate the look.\"\n"
                 "}\n\n"
-                
-                "FOR MULTIPLE PEOPLE (2-3 people):\n"
-                "Label them as 'Left', 'Middle', and 'Right' based on their position in the image.\n"
-                "Return a JSON object WITH position labels:\n"
-                "{\n"
-                "  \"score\": \"Left: 89/100, Middle: 78/100, Right: 82/100\",\n"
-                "  \"fit_line\": \"Left: ..., Middle: ..., Right: ...\",\n"
-                "  \"stylist_says\": \"Left: ..., Middle: ..., Right: ...\",\n"
-                "  \"what_went_wrong\": \"Left: ..., Middle: ..., Right: ...\"\n"
-                "}\n\n"
-                
-                "All values must be in one JSON object only — no nested or separate person objects.\n"
                 
                 "Scoring Rules:\n"
                 "• Matching tones: +10\n"
@@ -977,8 +1212,10 @@ async def analyze_outfit(
                 {
                     "type": "text",
                     "text": (
-                        "Assume the person's gender presentation from the image. Use NuFit JSON format for analysis: "
-                        "score, fit_line, stylist_says, what_went_wrong. Keep it short and voice-friendly! "
+                        "First, check if there is only one person in the images. If more than one person is detected, "
+                        "return the multiple_people error JSON. If only one person is present, assume their gender "
+                        "presentation from the image and use NuFit JSON format for analysis: score, fit_line, "
+                        "stylist_says, what_went_wrong. Keep it short and voice-friendly! "
                         "Return only valid JSON, no markdown formatting."
                     )
                 }
@@ -991,8 +1228,6 @@ async def analyze_outfit(
 
         if not reply:
             return JSONResponse(status_code=500, content={"error": "Failed to get outfit analysis"})
-
-        # Updated main.py endpoint section (replace the JSON parsing section)
 
         # Parse JSON response from GPT
         import re
@@ -1009,16 +1244,26 @@ async def analyze_outfit(
             # Parse JSON
             parsed_response = json.loads(cleaned_reply)
             
-            # Extract individual components
+            # Check if multiple people were detected
+            if parsed_response.get("error") == "multiple_people":
+                return JSONResponse(
+                    status_code=400, 
+                    content={
+                        "error": "multiple_people_detected",
+                        "message": parsed_response.get("message", "More than one person detected. Cannot scan the outfit.")
+                    }
+                )
+            
+            # Extract individual components for single person
             score = parsed_response.get("score", "N/A")
             fit_line = parsed_response.get("fit_line", "")
             stylist_says = parsed_response.get("stylist_says", "")
             what_went_wrong = parsed_response.get("what_went_wrong", "")
             
-            # Extract all numeric scores
+            # Extract numeric score (should be single score now)
             score_matches = re.findall(r'(\d+)/100', score)
             if score_matches:
-                individual_scores = [int(match) for match in score_matches]
+                individual_scores = [int(score_matches[0])]  # Only one score for single person
             else:
                 individual_scores = []
             
@@ -1026,10 +1271,20 @@ async def analyze_outfit(
             print(f"JSON parsing error: {e}")
             print(f"Raw reply: {reply}")
             
+            # Check if raw reply contains multiple people error
+            if "multiple_people" in reply.lower() or "more than one person" in reply.lower():
+                return JSONResponse(
+                    status_code=400, 
+                    content={
+                        "error": "multiple_people_detected",
+                        "message": "More than one person detected. Cannot scan the outfit."
+                    }
+                )
+            
             # Fallback: extract scores from raw reply
             score_matches = re.findall(r'(\d+)/100', reply)
             if score_matches:
-                individual_scores = [int(match) for match in score_matches]
+                individual_scores = [int(score_matches[0])]  # Only take first score
             else:
                 individual_scores = []
             
@@ -1045,13 +1300,13 @@ async def analyze_outfit(
             stylist_says = parsed_response["stylist_says"]
             what_went_wrong = parsed_response["what_went_wrong"]
 
-        # Create scan record in database with individual scores
+        # Create scan record in database with single score
         scan_success = db.create_scan(
             scan_id=scan_id,
             user_id=user_id,
             video_path=video_path,
             image_paths=frame_paths,
-            individual_scores=individual_scores,  # Pass list of individual scores
+            individual_scores=individual_scores,  # Will contain single score
             feedback=reply
         )
 
@@ -1080,8 +1335,8 @@ async def analyze_outfit(
             "fit_line": fit_line,
             "stylist_says": stylist_says,
             "what_went_wrong": what_went_wrong,
-            "individual_scores": individual_scores,  # List of all individual scores
-            "total_people": len(individual_scores) if individual_scores else 1,
+            "individual_scores": individual_scores,  # Will contain single score
+            "total_people": 1,  # Always 1 since we reject multiple people
             "user_id": user_id
         }
 
@@ -1100,7 +1355,8 @@ async def analyze_outfit(
         import traceback
         traceback.print_exc()
         return JSONResponse(status_code=500, content={"error": str(e)})
-
+    
+    
 # # New endpoint to serve audio files
 # @app.get("/audio/{filename}")
 # async def get_audio_file(filename: str):
@@ -1117,24 +1373,6 @@ async def analyze_outfit(
 #             raise HTTPException(status_code=404, detail="Audio file not found")
 #     except Exception as e:
 #         raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/user/scans/")
-async def get_current_user_scans(current_user: dict = Depends(get_authenticated_user)):
-    try:
-        # This is a simplified approach - you'll need to properly link auth users to scan users
-        user_email = current_user["email"]
-        
-        # Get all scans and filter by email (not efficient, but works for now)
-        # In production, you'd want a better way to link auth_users to users table
-        all_scans = []  # Implement proper user scan lookup
-        
-        return {"scans": all_scans}
-    except Exception as e:
-        return JSONResponse(status_code=500, content={"error": str(e)})
-
-# Scan History Endpoints
-
-# Replace your existing /user/scans-with-history/ endpoint with this fixed version
 
 @app.get("/user/scans-with-history/")
 async def get_user_scans_with_history(current_user: dict = Depends(get_authenticated_user)):
@@ -1215,28 +1453,78 @@ async def get_user_scans_with_history(current_user: dict = Depends(get_authentic
                     except:
                         image_paths = []
 
-                # Format chat history with flexible field handling
+                # ENHANCED MESSAGE FILTERING - Replace your existing filtering logic with this
+                def should_filter_message(message, role):
+                    """
+                    Determine if a message should be filtered out
+                    Returns True if message should be filtered (removed)
+                    """
+                    # Filter system messages
+                    if role == "system":
+                        return True
+                    
+                    # Filter empty messages
+                    if not message.strip():
+                        return True
+                    
+                    # Filter generic/template messages
+                    generic_patterns = [
+                        "analyze the following outfit images using nufit style rules",
+                        "analyze uploaded outfit images",
+                        "please analyze the following",
+                        "give me my fitscore",
+                        # Add more patterns as needed
+                    ]
+                    
+                    message_lower = message.lower()
+                    if any(pattern in message_lower for pattern in generic_patterns):
+                        return True
+                    
+                    # Filter messages that are just JSON responses (optional)
+                    if message.strip().startswith('{') and message.strip().endswith('}'):
+                        try:
+                            json.loads(message)
+                            return True  # It's a JSON response, filter it out
+                        except json.JSONDecodeError:
+                            pass  # Not valid JSON, keep it
+                    
+                    return False
+
+                # Format chat history with enhanced filtering
                 formatted_chat_history = []
+                seen_messages = set()  # To track duplicate messages
+
                 for msg in chat_history:
-                    if msg["role"] != "system":  # Filter out system messages
-                        # Handle different possible timestamp field names
-                        timestamp = None
-                        for time_field in ['timestamp', 'created_at', 'date_created', 'time']:
-                            if time_field in msg and msg[time_field]:
-                                timestamp = msg[time_field]
-                                break
-                        
-                        # If no timestamp found, use current time or scan creation time as fallback
-                        if not timestamp:
-                            timestamp = scan["created_at"]
-                        
-                        formatted_msg = {
-                            "id": msg.get("id", ""),
-                            "role": msg["role"],
-                            "message": msg["message"],
-                            "timestamp": timestamp
-                        }
-                        formatted_chat_history.append(formatted_msg)
+                    message_content = msg["message"].strip()
+                    
+                    # Apply filtering logic
+                    if should_filter_message(message_content, msg["role"]):
+                        continue
+                    
+                    # Check for duplicates
+                    message_key = f"{msg['role']}:{message_content}"
+                    if message_key in seen_messages:
+                        continue
+                    seen_messages.add(message_key)
+                    
+                    # Handle different possible timestamp field names
+                    timestamp = None
+                    for time_field in ['timestamp', 'created_at', 'date_created', 'time']:
+                        if time_field in msg and msg[time_field]:
+                            timestamp = msg[time_field]
+                            break
+                    
+                    # If no timestamp found, use current time or scan creation time as fallback
+                    if not timestamp:
+                        timestamp = scan["created_at"]
+                    
+                    formatted_msg = {
+                        "id": msg.get("id", ""),
+                        "role": msg["role"],
+                        "message": message_content,
+                        "timestamp": timestamp
+                    }
+                    formatted_chat_history.append(formatted_msg)
 
                 # Determine last activity - use the latest timestamp from chat or scan creation
                 last_activity = scan["created_at"]  # Default fallback
@@ -1289,9 +1577,6 @@ async def get_user_scans_with_history(current_user: dict = Depends(get_authentic
         import traceback
         traceback.print_exc()
         return JSONResponse(status_code=500, content={"error": str(e)})
-    
-# Also, you need to fix the analyze-outfit endpoint to properly link users
-# Add this helper function to find or create user profile
 
 def get_or_create_user_profile(db, user_email):
     """Get existing user profile or create a new one"""
