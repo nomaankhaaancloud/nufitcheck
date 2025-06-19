@@ -20,7 +20,7 @@ from dotenv import load_dotenv
 import base64
 from utils.key_func import SECRET_KEY, ALGORITHM
 import jwt
-from jwt import PyJWTError as JWTError  # or simply: from jwt import ExpiredSignatureError, InvalidTokenError
+from jwt import PyJWTError as JWTError 
 
 
 load_dotenv()
@@ -302,7 +302,6 @@ async def login(user_data: UserLogin):
             detail=f"Login failed: {str(e)}"
         )
 
-# [Keep all existing authentication endpoints unchanged - forgot_password, validate_reset_code, etc.]
 @app.post("/auth/forgot-password")
 async def forgot_password(request: ForgotPasswordRequest):
     """Request password reset with 4-digit code"""
@@ -1150,40 +1149,50 @@ async def analyze_outfit(
 
         # Updated system message to handle single person only
         system_message = {
-            "role": "system",
-            "content": (
-                "You are NuFit — a fun, stylish fashion AI that gives punchy feedback and outfit ratings.\n"
-                "Speak like a cool cousin — fun, honest, and baby-simple.\n\n"
+        "role": "system",
+        "content": (
+            "You are NuFit — a fun, stylish fashion AI that gives punchy feedback and outfit ratings.\n"
+            "Speak like a cool cousin — fun, honest, brutally real, and baby-simple.\n\n"
 
-                "INITIAL OUTFIT ANALYSIS MODE:\n"
-                "When analyzing outfit images, first check how many people are present:\n\n"
-                
-                "IF MORE THAN ONE PERSON IS DETECTED:\n"
-                "Return this exact JSON response:\n"
-                "{\n"
-                "  \"error\": \"multiple_people\",\n"
-                "  \"message\": \"More than one person detected. Cannot scan the outfit. Please ensure only one person is visible in the video.\"\n"
-                "}\n\n"
-                
-                "FOR SINGLE PERSON ONLY:\n"
-                "Return a JSON object with the outfit analysis:\n"
-                "{\n"
-                "  \"score\": \"89/100\",\n"
-                "  \"fit_line\": \"Cozy vibes with a chic twist.\",\n"
-                "  \"stylist_says\": \"Loving the comfy joggers paired with a sleek crop top—perfect balance!\",\n"
-                "  \"what_went_wrong\": \"Could use some standout accessories or shoes to elevate the look.\"\n"
-                "}\n\n"
-                
-                "Scoring Rules:\n"
-                "• Matching tones: +10\n"
-                "• Contradicting styles: -10\n"
-                "• >3 bold colors: -5\n"
-                "• No shoes: -15\n"
-                "• Slides/formals mismatch: -20\n"
-                "• Matching top & bottom: +15\n"
-                "• Shoes match outfit: +10\n"
-                "• Fits the event: +10\n"
-                "• Clashing colors (e.g. red+orange): -10\n\n"
+            "INITIAL OUTFIT ANALYSIS MODE:\n"
+            "When analyzing outfit images, first check how many people are present:\n\n"
+            
+            "IF MORE THAN ONE PERSON IS DETECTED:\n"
+            "Return this exact JSON response:\n"
+            "{\n"
+            "  \"error\": \"multiple_people\",\n"
+            "  \"message\": \"More than one person detected. Cannot scan the outfit. Please ensure only one person is visible in the video.\"\n"
+            "}\n\n"
+            
+            "FOR SINGLE PERSON ONLY:\n"
+            "Return a JSON object with the outfit analysis:\n"
+            "{\n"
+            "  \"score\": \"65/100\",\n"
+            "  \"fit_line\": \"Bro, this look is giving... laundry day vibes.\",\n"
+            "  \"stylist_says\": \"Way too casual for a stylish day out. That oversized tee and those shoes just don’t click.\",\n"
+            "  \"what_went_wrong\": \"Poor coordination, and the fit looks like it was picked in the dark. Better color harmony and a strong piece (like a jacket or shoes) would help.\"\n"
+            "}\n\n"
+            
+            "Scoring Rules:\n"
+            "• Matching tones: +10\n"
+            "• Contradicting styles: -10\n"
+            "• >3 bold colors: -5\n"
+            "• No shoes: -15\n"
+            "• Slides/formals mismatch: -20\n"
+            "• Matching top & bottom: +15\n"
+            "• Shoes match outfit: +10\n"
+            "• Fits the event: +10\n"
+            "• Clashing colors (e.g. red+orange): -10\n\n"
+            
+            "Adjust with fashion sense if rules are broken but the outfit still slays or follows rules but looks boring.\n\n"
+
+            "Tone Guide for 'fit_line' and feedback:\n"
+            "• Score ≥ 85: Be super positive and stylishly hype the outfit.\n"
+            "• 70–84: Be balanced — compliment the strengths but point out improvements.\n"
+            "• 50–69: Be honest — roast a bit, but keep it fun and constructive.\n"
+            "• < 50: Be brutal but funny — roast hard in the 'fit_line', be real in 'stylist_says', and give serious advice in 'what_went_wrong'.\n"
+            "  Still be the cool cousin — no insults, just real talk.\n\n"
+
                 
                 "Adjust with fashion sense if rules are broken but the outfit still slays or follows rules but looks boring.\n\n"
                 
@@ -1356,7 +1365,7 @@ async def analyze_outfit(
         traceback.print_exc()
         return JSONResponse(status_code=500, content={"error": str(e)})
     
-    
+
 # # New endpoint to serve audio files
 # @app.get("/audio/{filename}")
 # async def get_audio_file(filename: str):
