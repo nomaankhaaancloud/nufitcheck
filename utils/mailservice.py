@@ -92,12 +92,6 @@ def log_password_reset_code(email: str, reset_code: str):
     print(f"This code expires in 15 minutes")
     print(f"{'='*50}\n")
 
-# Legacy function for backward compatibility (remove after migration)
-def log_password_reset_link(email: str, reset_link: str):
-    """Legacy function - use log_password_reset_code instead"""
-    print(f"Warning: log_password_reset_link is deprecated")
-    print(f"Password reset link for {email}: {reset_link}")
-
 # Alternative function for plain text emails (if HTML not supported)
 def send_password_reset_email_plain(to_email: str, reset_code: str) -> bool:
     """Send password reset email with 4-digit code (plain text version)"""

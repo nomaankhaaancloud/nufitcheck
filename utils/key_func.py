@@ -21,7 +21,7 @@ def create_reset_token(email: str) -> str:
         "exp": datetime.utcnow() + timedelta(minutes=RESET_TOKEN_EXPIRE_MINUTES),
         "iat": datetime.utcnow()
     }
-    
+       
     try:
         encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
         return encoded_jwt

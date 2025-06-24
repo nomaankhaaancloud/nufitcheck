@@ -4,7 +4,7 @@ from typing import Optional
 from utils.key_func import verify_token, get_current_user_email
 from database import DatabaseManager
 
-security = HTTPBearer(auto_error=False)  # Make it optional
+security = HTTPBearer(auto_error=False) 
 
 def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] = Depends(security), db: DatabaseManager = None):
     """Get current authenticated user from token"""

@@ -1094,19 +1094,26 @@ async def chat_endpoint(
 
 #         return response_data
 
-#     except Exception as e:
-#         print(f"Error in analyze_outfit: {e}")
-#         import traceback
-#         traceback.print_exc()
-#         return JSONResponse(status_code=500, content={"error": str(e)})
-
-
 @app.post("/analyze-outfit/")
 async def analyze_outfit(
-    video: UploadFile = File(...),
+    video: UploadFile = File(None),
+    photo: UploadFile = File(None),
     current_user: dict = Depends(get_authenticated_user)
 ):
     try:
+        # Validate input - require either video or photo, but not both
+        if not video and not photo:
+            return JSONResponse(
+                status_code=400, 
+                content={"error": "Either video or photo file is required"}
+            )
+        
+        if video and photo:
+            return JSONResponse(
+                status_code=400, 
+                content={"error": "Please provide either video or photo, not both"}
+            )
+
         # Get or create user profile for outfit analysis
         user_email = current_user["email"]
         
@@ -1122,23 +1129,50 @@ async def analyze_outfit(
         # Generate unique scan ID
         scan_id = str(uuid.uuid4())
         
-        # Save video to disk
-        video_filename = f"{scan_id}_{video.filename}"
-        video_path = os.path.join(UPLOAD_DIR, video_filename)
-        with open(video_path, "wb") as buffer:
-            shutil.copyfileobj(video.file, buffer)
-
         # Create scan-specific frame directory
         scan_frame_dir = os.path.join(FRAME_DIR, scan_id)
         os.makedirs(scan_frame_dir, exist_ok=True)
 
-        # Extract frames
-        extract_frames(video_path, scan_frame_dir)
+        # Handle video input
+        if video:
+            # Save video to disk
+            video_filename = f"{scan_id}_{video.filename}"
+            video_path = os.path.join(UPLOAD_DIR, video_filename)
+            with open(video_path, "wb") as buffer:
+                shutil.copyfileobj(video.file, buffer)
 
-        # Load image messages (max 5)
+            # Extract frames
+            extract_frames(video_path, scan_frame_dir)
+            
+            # Store video path for database
+            file_path = video_path
+        
+        # Handle photo input
+        else:  # photo is provided
+            # Validate photo file type
+            if not photo.content_type or not photo.content_type.startswith('image/'):
+                return JSONResponse(
+                    status_code=400, 
+                    content={"error": "Invalid photo format. Please upload a valid image file."}
+                )
+            
+            # Save photo directly to frame directory
+            photo_filename = f"frame_001.jpg"  # Standardize naming
+            photo_path = os.path.join(scan_frame_dir, photo_filename)
+            
+            with open(photo_path, "wb") as buffer:
+                shutil.copyfileobj(photo.file, buffer)
+            
+            # Store photo path for database (use the photo path as file_path)
+            file_path = photo_path
+
+        # Load image messages (max 5 for video, 1 for photo)
         image_messages = load_image_messages(scan_frame_dir)
         if not image_messages:
-            return JSONResponse(status_code=400, content={"error": "No frames extracted."})
+            return JSONResponse(
+                status_code=400, 
+                content={"error": "No valid images found for analysis."}
+            )
 
         # Get frame paths for database storage
         frame_paths = []
@@ -1161,7 +1195,7 @@ async def analyze_outfit(
             "Return this exact JSON response:\n"
             "{\n"
             "  \"error\": \"multiple_people\",\n"
-            "  \"message\": \"More than one person detected. Cannot scan the outfit. Please ensure only one person is visible in the video.\"\n"
+            "  \"message\": \"More than one person detected. Cannot scan the outfit. Please ensure only one person is visible in the video/photo.\"\n"
             "}\n\n"
             
             "FOR SINGLE PERSON ONLY:\n"
@@ -1169,7 +1203,7 @@ async def analyze_outfit(
             "{\n"
             "  \"score\": \"65/100\",\n"
             "  \"fit_line\": \"Bro, this look is giving... laundry day vibes.\",\n"
-            "  \"stylist_says\": \"Way too casual for a stylish day out. That oversized tee and those shoes just don’t click.\",\n"
+            "  \"stylist_says\": \"Way too casual for a stylish day out. That oversized tee and those shoes just don't click.\",\n"
             "  \"what_went_wrong\": \"Poor coordination, and the fit looks like it was picked in the dark. Better color harmony and a strong piece (like a jacket or shoes) would help.\"\n"
             "}\n\n"
             
@@ -1210,9 +1244,12 @@ async def analyze_outfit(
             )
         }
 
+        # Determine input type for user message
+        input_type = "video" if video else "photo"
+        
         user_text_message = {
             "role": "user",
-            "content": "Please analyze the following outfit images using NuFit style rules and give me my FitScore and tips!"
+            "content": f"Please analyze the following outfit {input_type} using NuFit style rules and give me my FitScore and tips!"
         }
 
         user_image_message = {
@@ -1313,7 +1350,7 @@ async def analyze_outfit(
         scan_success = db.create_scan(
             scan_id=scan_id,
             user_id=user_id,
-            video_path=video_path,
+            video_path=file_path,  # This will be video_path for video, photo_path for photo
             image_paths=frame_paths,
             individual_scores=individual_scores,  # Will contain single score
             feedback=reply
@@ -1331,7 +1368,7 @@ async def analyze_outfit(
 
         db.add_chat_message(scan_id, "system", chat_system_message)
         db.add_chat_message(scan_id, "user", user_text_message["content"])
-        db.add_chat_message(scan_id, "user", "Analyze uploaded outfit images")
+        db.add_chat_message(scan_id, "user", f"Analyze uploaded outfit {input_type}")
         db.add_chat_message(scan_id, "assistant", reply)
 
         # Generate audio for the analysis response (base64)
@@ -1346,7 +1383,8 @@ async def analyze_outfit(
             "what_went_wrong": what_went_wrong,
             "individual_scores": individual_scores,  # Will contain single score
             "total_people": 1,  # Always 1 since we reject multiple people
-            "user_id": user_id
+            "user_id": user_id,
+            "input_type": input_type  # Add this to indicate whether video or photo was used
         }
 
         # Add audio data if generation was successful
@@ -1363,8 +1401,7 @@ async def analyze_outfit(
         print(f"Error in analyze_outfit: {e}")
         import traceback
         traceback.print_exc()
-        return JSONResponse(status_code=500, content={"error": str(e)})
-    
+        return JSONResponse(status_code=500, content={"error": str(e)})    
 
 # # New endpoint to serve audio files
 # @app.get("/audio/{filename}")

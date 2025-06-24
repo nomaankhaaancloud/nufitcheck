@@ -48,12 +48,3 @@ def generate_audio(text, voice_id=AGENT_VOICE_ID, api_key=ELEVENLABS_API_KEY):
     except Exception as e:
         print(f"Error generating audio: {e}")
         return None
-
-# Test function (commented out for production)
-"""
-if __name__ == "__main__":
-    test_text = "Hello, this is a test of the voice generation system."
-    test_output = "test_output.mp3"
-    success = generate_audio(test_text, output_path=test_output)
-    print(f"Test result: {'Success' if success else 'Failed'}")
-"""
