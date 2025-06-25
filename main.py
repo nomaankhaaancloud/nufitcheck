@@ -21,7 +21,8 @@ import base64
 from utils.key_func import SECRET_KEY, ALGORITHM
 import jwt
 from jwt import PyJWTError as JWTError 
-
+from fastapi import Form, File, UploadFile
+from utils.voiceagent import speech_to_text, generate_response_audio_base64
 
 load_dotenv()
 
@@ -744,19 +745,58 @@ async def get_mfa_status(current_user: dict = Depends(get_authenticated_user)):
 import base64
 
 # Updated chat endpoint
+# Updated chat endpoint with audio support
 @app.post("/chat/")
 async def chat_endpoint(
-    message: dict = Body(...),
+    scan_id: str = Form(...),
+    message: str = Form(None),
+    audio_file: UploadFile = File(None),
     current_user: dict = Depends(get_authenticated_user)
 ):
     try:
-        scan_id = message.get("scan_id")
-        user_message = message.get("message")
-        
-        if not scan_id or not user_message:
+        if not scan_id:
             return JSONResponse(
                 status_code=400, 
-                content={"error": "Missing required fields: scan_id or message"}
+                content={"error": "Missing required field: scan_id"}
+            )
+
+        # Check if we have either message or audio_file
+        if not message and not audio_file:
+            return JSONResponse(
+                status_code=400, 
+                content={"error": "Either message or audio_file must be provided"}
+            )
+
+        user_message = None
+
+        # If audio file is provided, convert speech to text
+        if audio_file:
+            try:
+                # Read audio file content
+                audio_content = await audio_file.read()
+                
+                # Convert speech to text using ElevenLabs
+                user_message = speech_to_text(audio_content)
+                
+                if not user_message:
+                    return JSONResponse(
+                        status_code=400,
+                        content={"error": "Failed to convert speech to text"}
+                    )
+                    
+            except Exception as e:
+                return JSONResponse(
+                    status_code=400,
+                    content={"error": f"Error processing audio file: {str(e)}"}
+                )
+        else:
+            # Use the provided text message
+            user_message = message
+
+        if not user_message or not user_message.strip():
+            return JSONResponse(
+                status_code=400,
+                content={"error": "No valid message content found"}
             )
 
         # Get user_id from email (since we need the UUID user_id for scans table)
@@ -805,8 +845,8 @@ async def chat_endpoint(
                 "Be helpful, encouraging, and give practical fashion advice. "
                 "You previously analyzed this user's outfit and gave them a score. "
                 "Reference that analysis when relevant, but respond conversationally. "
-                "Answer their questions directly and naturally."
-                "If user asks anything unrealted to fashion or styling tips, tell user to stick to the topic"
+                "Answer their questions directly and naturally. "
+                "If user asks anything unrelated to fashion or styling tips, tell user to stick to the topic"
             )
         }
 
@@ -842,7 +882,10 @@ async def chat_endpoint(
             # Generate audio for the chat response (base64)
             audio_data = generate_response_audio_base64(reply, scan_id, "chat")
             
-            response_data = {"reply": reply}
+            response_data = {
+                "reply": reply,
+                "transcribed_message": user_message if audio_file else None
+            }
             
             # Add audio data if generation was successful
             if audio_data:
