@@ -205,7 +205,6 @@ class DatabaseManager:
                     'updated_at': user['updated_at']
                 }
             return None
-            
         except Exception as e:
             print(f"Error getting auth user: {e}")
             return None
@@ -866,7 +865,8 @@ class DatabaseManager:
         except Exception as e:
             print(f"Error getting all scans: {e}")
             return []
-        
+    
+    # Getting user profile using emial 
     def get_user_by_email(self, email):
         """Get user profile by email"""
         try:
