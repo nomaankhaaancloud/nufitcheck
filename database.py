@@ -5,6 +5,8 @@ import os
 from datetime import datetime
 from typing import List, Dict, Optional
 import bcrypt
+import random
+import string
 
 class DatabaseManager:
     def __init__(self):
@@ -35,6 +37,42 @@ class DatabaseManager:
         """Close database connection"""
         if self.connection and not self.connection.closed:
             self.connection.close()
+
+    def create_mfa_otp_table(self) -> bool:
+        """Create the MFA OTP codes table if it doesn't exist"""
+        try:
+            if not self.connect():
+                return False
+            
+            cursor = self.connection.cursor()
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS mfa_otp_codes (
+                    id SERIAL PRIMARY KEY,
+                    user_email VARCHAR(255) UNIQUE NOT NULL,
+                    otp_code VARCHAR(6) NOT NULL,
+                    expires_at TIMESTAMP NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_email) REFERENCES auth_users(email) ON DELETE CASCADE
+                )
+            ''')
+            
+            # Create indexes for faster lookups
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_mfa_otp_user_email 
+                ON mfa_otp_codes(user_email)
+            ''')
+            
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_mfa_otp_expires_at 
+                ON mfa_otp_codes(expires_at)
+            ''')
+            
+            cursor.close()
+            print("MFA OTP table created successfully")
+            return True
+        except Exception as e:
+            print(f"Error creating MFA OTP table: {e}")
+            return False
 
     def init_db(self):
         """Initialize database tables"""
@@ -103,6 +141,31 @@ class DatabaseManager:
                 )
             """)
             
+            # Add MFA table - Updated to use phone_number instead of secret_key
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS user_mfa (
+                    id SERIAL PRIMARY KEY,
+                    user_email VARCHAR(255) UNIQUE NOT NULL,
+                    phone_number VARCHAR(20),
+                    is_enabled BOOLEAN DEFAULT FALSE,
+                    backup_codes TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_email) REFERENCES auth_users(email) ON DELETE CASCADE
+                )
+            ''')
+
+            # Create MFA OTP codes table
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS mfa_otp_codes (
+                    id SERIAL PRIMARY KEY,
+                    user_email VARCHAR(255) UNIQUE NOT NULL,
+                    otp_code VARCHAR(6) NOT NULL,
+                    expires_at TIMESTAMP NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_email) REFERENCES auth_users(email) ON DELETE CASCADE
+                )
+            ''')
+            
             # Create indexes for better performance
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_auth_users_email ON auth_users(email);
@@ -122,27 +185,182 @@ class DatabaseManager:
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_password_reset_codes_email ON password_reset_codes(email);
             """)
-
-            # Add MFA table
+            
+            # MFA table indexes
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_user_mfa_email ON user_mfa(user_email);
+            """)
+            
+            # MFA OTP codes table indexes
             cursor.execute('''
-                CREATE TABLE IF NOT EXISTS user_mfa (
-                    id SERIAL PRIMARY KEY,
-                    user_email TEXT UNIQUE NOT NULL,
-                    secret_key TEXT NOT NULL,
-                    is_enabled BOOLEAN DEFAULT FALSE,
-                    backup_codes TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (user_email) REFERENCES auth_users (email) ON DELETE CASCADE
-                )
+                CREATE INDEX IF NOT EXISTS idx_mfa_otp_user_email 
+                ON mfa_otp_codes(user_email)
+            ''')
+            
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_mfa_otp_expires_at 
+                ON mfa_otp_codes(expires_at)
             ''')
 
-            
             cursor.close()
             print("Database tables initialized successfully")
             
         except Exception as e:
             print(f"Error initializing database: {e}")
             raise
+
+    # Add the MFA-related methods here
+    def create_mfa_phone(self, user_email: str, phone_number: str) -> bool:
+        try:
+            if not self.connect():
+                return False
+
+            cursor = self.connection.cursor()
+            cursor.execute('''
+                INSERT INTO user_mfa (user_email, phone_number, is_enabled)
+                VALUES (%s, %s, FALSE)
+                ON CONFLICT (user_email) DO UPDATE SET phone_number = EXCLUDED.phone_number
+            ''', (user_email, phone_number))
+            cursor.close()
+            return True
+        except Exception as e:
+            print(f"Error creating MFA phone: {e}")
+            return False
+
+    def get_mfa_phone(self, user_email: str) -> str:
+        try:
+            if not self.connect():
+                return None
+
+            cursor = self.connection.cursor()
+            cursor.execute('SELECT phone_number FROM user_mfa WHERE user_email = %s', (user_email,))
+            result = cursor.fetchone()
+            cursor.close()
+            return result[0] if result else None
+        except Exception as e:
+            print(f"Error getting MFA phone: {e}")
+            return None
+
+    def enable_mfa(self, user_email: str) -> bool:
+        try:
+            if not self.connect():
+                return False
+
+            cursor = self.connection.cursor()
+            cursor.execute('UPDATE user_mfa SET is_enabled = TRUE WHERE user_email = %s', (user_email,))
+            updated = cursor.rowcount > 0
+            cursor.close()
+            return updated
+        except Exception as e:
+            print(f"Error enabling MFA: {e}")
+            return False
+
+    def disable_mfa(self, user_email: str) -> bool:
+        try:
+            if not self.connect():
+                return False
+
+            cursor = self.connection.cursor()
+            cursor.execute('UPDATE user_mfa SET is_enabled = FALSE WHERE user_email = %s', (user_email,))
+            updated = cursor.rowcount > 0
+            cursor.close()
+            return updated
+        except Exception as e:
+            print(f"Error disabling MFA: {e}")
+            return False
+
+    def is_mfa_enabled(self, user_email: str) -> bool:
+        try:
+            if not self.connect():
+                return False
+
+            cursor = self.connection.cursor()
+            cursor.execute('SELECT is_enabled FROM user_mfa WHERE user_email = %s', (user_email,))
+            result = cursor.fetchone()
+            cursor.close()
+            return bool(result[0]) if result else False
+        except Exception as e:
+            print(f"Error checking MFA status: {e}")
+            return False
+
+    def store_backup_codes(self, user_email: str, backup_codes: str) -> bool:
+        try:
+            if not self.connect():
+                return False
+
+            cursor = self.connection.cursor()
+            cursor.execute('UPDATE user_mfa SET backup_codes = %s WHERE user_email = %s', (backup_codes, user_email))
+            updated = cursor.rowcount > 0
+            cursor.close()
+            return updated
+        except Exception as e:
+            print(f"Error storing backup codes: {e}")
+            return False
+
+    def get_backup_codes(self, user_email: str) -> str:
+        try:
+            if not self.connect():
+                return None
+
+            cursor = self.connection.cursor()
+            cursor.execute('SELECT backup_codes FROM user_mfa WHERE user_email = %s', (user_email,))
+            result = cursor.fetchone()
+            cursor.close()
+            return result[0] if result else None
+        except Exception as e:
+            print(f"Error getting backup codes: {e}")
+            return None
+
+    def use_backup_code(self, user_email: str, code: str) -> bool:
+        try:
+            backup_codes = self.get_backup_codes(user_email)
+            if not backup_codes:
+                return False
+
+            codes_list = backup_codes.split(',')
+            if code in codes_list:
+                codes_list.remove(code)
+                new_codes = ','.join(codes_list)
+
+                if not self.connect():
+                    return False
+
+                cursor = self.connection.cursor()
+                cursor.execute('UPDATE user_mfa SET backup_codes = %s WHERE user_email = %s', (new_codes, user_email))
+                updated = cursor.rowcount > 0
+                cursor.close()
+                return updated
+            return False
+        except Exception as e:
+            print(f"Error using backup code: {e}")
+            return False
+
+    def get_active_otp(self, user_email: str) -> dict:
+        """Get active OTP for a user (for debugging purposes)"""
+        try:
+            if not self.connect():
+                return None
+            
+            cursor = self.connection.cursor()
+            cursor.execute('''
+                SELECT otp_code, expires_at, created_at 
+                FROM mfa_otp_codes 
+                WHERE user_email = %s AND expires_at > %s
+            ''', (user_email, datetime.now()))
+            
+            result = cursor.fetchone()
+            cursor.close()
+            
+            if result:
+                return {
+                    "otp_code": result[0],
+                    "expires_at": result[1],
+                    "created_at": result[2]
+                }
+            return None
+        except Exception as e:
+            print(f"Error getting active OTP: {e}")
+            return None
 
     # Authentication methods
     def hash_password(self, password: str) -> str:
@@ -157,6 +375,7 @@ class DatabaseManager:
         except Exception as e:
             print(f"Error verifying password: {e}")
             return False
+            
 
     def create_auth_user(self, email: str, password: str) -> bool:
         """Create a new authenticated user"""
@@ -430,55 +649,35 @@ class DatabaseManager:
             print(f"Error marking code as used: {e}")
             return False
 
-    def cleanup_expired_codes(self):
-        """Remove expired or used password reset codes"""
-        try:
-            if not self.connect():
-                return 0
-                
-            cursor = self.connection.cursor()
-            cursor.execute(
-                "DELETE FROM password_reset_codes WHERE expires_at < CURRENT_TIMESTAMP OR used = TRUE"
-            )
-            deleted_count = cursor.rowcount
-            cursor.close()
-            
-            print(f"Cleaned up {deleted_count} expired/used password reset codes")
-            return deleted_count
-            
-        except Exception as e:
-            print(f"Error cleaning up codes: {e}")
-            return 0
-        
-    def create_mfa_secret(self, user_email: str, secret_key: str) -> bool:
+    def create_mfa_phone(self, user_email: str, phone_number: str) -> bool:
         try:
             if not self.connect():
                 return False
 
             cursor = self.connection.cursor()
             cursor.execute('''
-                INSERT INTO user_mfa (user_email, secret_key, is_enabled)
+                INSERT INTO user_mfa (user_email, phone_number, is_enabled)
                 VALUES (%s, %s, FALSE)
-                ON CONFLICT (user_email) DO UPDATE SET secret_key = EXCLUDED.secret_key
-            ''', (user_email, secret_key))
+                ON CONFLICT (user_email) DO UPDATE SET phone_number = EXCLUDED.phone_number
+            ''', (user_email, phone_number))
             cursor.close()
             return True
         except Exception as e:
-            print(f"Error creating MFA secret: {e}")
+            print(f"Error creating MFA phone: {e}")
             return False
 
-    def get_mfa_secret(self, user_email: str) -> str:
+    def get_mfa_phone(self, user_email: str) -> str:
         try:
             if not self.connect():
                 return None
 
             cursor = self.connection.cursor()
-            cursor.execute('SELECT secret_key FROM user_mfa WHERE user_email = %s', (user_email,))
+            cursor.execute('SELECT phone_number FROM user_mfa WHERE user_email = %s', (user_email,))
             result = cursor.fetchone()
             cursor.close()
             return result[0] if result else None
         except Exception as e:
-            print(f"Error getting MFA secret: {e}")
+            print(f"Error getting MFA phone: {e}")
             return None
 
     def enable_mfa(self, user_email: str) -> bool:
@@ -574,6 +773,68 @@ class DatabaseManager:
         except Exception as e:
             print(f"Error using backup code: {e}")
             return False
+
+    def create_mfa_otp_table(self) -> bool:
+        """Create the MFA OTP codes table if it doesn't exist"""
+        try:
+            if not self.connect():
+                return False
+            
+            cursor = self.connection.cursor()
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS mfa_otp_codes (
+                    id SERIAL PRIMARY KEY,
+                    user_email VARCHAR(255) UNIQUE NOT NULL,
+                    otp_code VARCHAR(6) NOT NULL,
+                    expires_at TIMESTAMP NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_email) REFERENCES users(email) ON DELETE CASCADE
+                )
+            ''')
+            
+            # Create index for faster lookups
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_mfa_otp_user_email 
+                ON mfa_otp_codes(user_email)
+            ''')
+            
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_mfa_otp_expires_at 
+                ON mfa_otp_codes(expires_at)
+            ''')
+            
+            cursor.close()
+            return True
+        except Exception as e:
+            print(f"Error creating MFA OTP table: {e}")
+            return False
+
+    def get_active_otp(self, user_email: str) -> dict:
+        """Get active OTP for a user (for debugging purposes)"""
+        try:
+            if not self.connect():
+                return None
+            
+            cursor = self.connection.cursor()
+            cursor.execute('''
+                SELECT otp_code, expires_at, created_at 
+                FROM mfa_otp_codes 
+                WHERE user_email = %s AND expires_at > %s
+            ''', (user_email, datetime.now()))
+            
+            result = cursor.fetchone()
+            cursor.close()
+            
+            if result:
+                return {
+                    "otp_code": result[0],
+                    "expires_at": result[1],
+                    "created_at": result[2]
+                }
+            return None
+        except Exception as e:
+            print(f"Error getting active OTP: {e}")
+            return None
 
 
     # Keep existing methods for outfit analysis functionality
@@ -882,3 +1143,22 @@ class DatabaseManager:
         except Exception as e:
             print(f"Error getting user by email: {e}")
             return None
+    def cleanup_expired_codes(self):
+        """Remove expired or used password reset codes"""
+        try:
+            if not self.connect():
+                return 0
+
+            cursor = self.connection.cursor()
+            cursor.execute(
+                "DELETE FROM password_reset_codes WHERE expires_at < CURRENT_TIMESTAMP OR used = TRUE"
+            )
+            deleted_count = cursor.rowcount
+            cursor.close()
+
+            print(f"Cleaned up {deleted_count} expired/used password reset codes")
+            return deleted_count
+
+        except Exception as e:
+            print(f"Error cleaning up expired codes: {e}")
+            return 0

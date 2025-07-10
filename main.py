@@ -14,7 +14,7 @@ from gpt import chat_with_gpt, load_image_messages
 from database import DatabaseManager
 from utils.mailservice import send_password_reset_email, log_password_reset_code
 from utils.authmiddleware import get_current_user, get_optional_current_user, get_authenticated_user
-from utils.key_func import create_access_token, generate_4_digit_code, create_access_token_with_mfa
+from utils.key_func import create_access_token, generate_4_digit_code, create_access_token_with_mfa, create_temp_mfa_token, generate_backup_codes
 from utils.voiceagent import generate_audio
 from dotenv import load_dotenv
 import base64
@@ -23,10 +23,21 @@ import jwt
 from jwt import PyJWTError as JWTError 
 from fastapi import Form, File, UploadFile
 from utils.voiceagent import speech_to_text, generate_response_audio_base64
+import random
+import string
+from fastapi.middleware.cors import CORSMiddleware
 
 load_dotenv()
 
 app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # In production, specify your domains
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Initialize database
 db = DatabaseManager()
@@ -40,7 +51,7 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(FRAME_DIR, exist_ok=True)
 # os.makedirs(AUDIO_DIR, exist_ok=True)
 
-# Pydantic models for request/response
+# Updated Pydantic model
 class UserSignup(BaseModel):
     email: EmailStr
     password: str
@@ -70,8 +81,12 @@ class SetNewPasswordRequest(BaseModel):
     reset_token: str
     new_password: str
 
+# Updated Pydantic Models
+from pydantic import BaseModel, EmailStr
+from typing import Optional
+
 class MFASetupRequest(BaseModel):
-    pass
+    phone_number: str  # Format: +1234567890
 
 class MFAVerifyRequest(BaseModel):
     token: str
@@ -214,7 +229,7 @@ async def signup(user_data: UserSignup):
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Password must be at least 6 characters long"
             )
-
+        
         # Create authenticated user
         auth_success = db.create_auth_user(user_data.email, user_data.password)
         if not auth_success:
@@ -222,7 +237,7 @@ async def signup(user_data: UserSignup):
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Email already registered"
             )
-
+        
         # Get user data immediately after creation
         user = db.get_auth_user_by_email(user_data.email)
         if not user:
@@ -230,14 +245,14 @@ async def signup(user_data: UserSignup):
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Failed to retrieve user after creation"
             )
-
+        
         # Create user profile for outfit analysis
         user_id = str(uuid.uuid4())
         profile_success = db.create_user(user_id, user_data.email)
         
         if not profile_success:
             print(f"Warning: Failed to create user profile for {user_data.email}")
-
+        
         # Create access token
         access_token = create_access_token(data={"sub": user_data.email})
         if not access_token:
@@ -245,7 +260,7 @@ async def signup(user_data: UserSignup):
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Failed to create access token"
             )
-
+        
         return {
             "access_token": access_token,
             "token_type": "bearer",
@@ -255,7 +270,6 @@ async def signup(user_data: UserSignup):
                 "created_at": user["created_at"]
             }
         }
-
     except HTTPException:
         raise
     except Exception as e:
@@ -264,6 +278,7 @@ async def signup(user_data: UserSignup):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Registration failed: {str(e)}"
         )
+
 
 @app.post("/auth/login", response_model=AuthResponse)
 async def login(user_data: UserLogin):
@@ -504,8 +519,130 @@ async def get_current_user_info(current_user: dict = Depends(get_authenticated_u
         }
     }
 
+# Twilio SMS Service with PostgreSQL storage for OTP codes
+import os
+import random
+import string
+from twilio.rest import Client
+from datetime import datetime, timedelta
+
+class TwilioSMSService:
+    def __init__(self, db_connection):
+        self.is_development = os.getenv('ENVIRONMENT', 'production') == 'development'
+        self.db = db_connection  # Pass the database connection instance
+        
+        # Only initialize Twilio client if not in development mode
+        if not self.is_development:
+            self.client = Client(
+                os.getenv('TWILIO_ACCOUNT_SID'),
+                os.getenv('TWILIO_AUTH_TOKEN')
+            )
+            self.from_number = os.getenv('TWILIO_PHONE_NUMBER')
+        else:
+            self.client = None
+            self.from_number = None
+    
+    def generate_otp(self) -> str:
+        """Generate a 6-digit OTP"""
+        return ''.join(random.choices(string.digits, k=6))
+    
+    def send_otp(self, phone_number: str, otp: str) -> bool:
+        """Send OTP via SMS"""
+        try:
+            # In development mode, just log the OTP instead of sending SMS
+            if self.is_development:
+                print(f"[DEV MODE] SMS OTP for {phone_number}: {otp}")
+                print(f"[DEV MODE] Environment check - ENVIRONMENT={os.getenv('ENVIRONMENT')}")
+                return True
+            
+            if not self.client or not self.from_number:
+                print("Error: Twilio client not initialized")
+                return False
+                
+            message = self.client.messages.create(
+                body=f"Your verification code is: {otp}. This code will expire in 5 minutes.",
+                from_=self.from_number,
+                to=phone_number
+            )
+            return True
+        except Exception as e:
+            print(f"Error sending SMS: {e}")
+            return False
+    
+    def store_otp(self, user_email: str, otp: str, expires_in: int = 300) -> bool:
+        """Store OTP in PostgreSQL with expiration (default 5 minutes)"""
+        try:
+            if not self.db.connect():
+                return False
+            
+            # Calculate expiration time
+            expiration_time = datetime.now() + timedelta(seconds=expires_in)
+            
+            cursor = self.db.connection.cursor()
+            cursor.execute('''
+                INSERT INTO mfa_otp_codes (user_email, otp_code, expires_at, created_at)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (user_email) DO UPDATE SET
+                    otp_code = EXCLUDED.otp_code,
+                    expires_at = EXCLUDED.expires_at,
+                    created_at = EXCLUDED.created_at
+            ''', (user_email, otp, expiration_time, datetime.now()))
+            cursor.close()
+            return True
+        except Exception as e:
+            print(f"Error storing OTP: {e}")
+            return False
+    
+    def verify_otp(self, user_email: str, provided_otp: str) -> bool:
+        """Verify OTP and remove it after successful verification"""
+        try:
+            if not self.db.connect():
+                return False
+            
+            cursor = self.db.connection.cursor()
+            
+            # Get the stored OTP and check if it's not expired
+            cursor.execute('''
+                SELECT otp_code FROM mfa_otp_codes 
+                WHERE user_email = %s AND expires_at > %s
+            ''', (user_email, datetime.now()))
+            
+            result = cursor.fetchone()
+            
+            if result and result[0] == provided_otp:
+                # Delete the OTP after successful verification
+                cursor.execute('DELETE FROM mfa_otp_codes WHERE user_email = %s', (user_email,))
+                cursor.close()
+                return True
+            
+            cursor.close()
+            return False
+        except Exception as e:
+            print(f"Error verifying OTP: {e}")
+            return False
+    
+    def cleanup_expired_otps(self) -> bool:
+        """Clean up expired OTP codes (can be called periodically)"""
+        try:
+            if not self.db.connect():
+                return False
+            
+            cursor = self.db.connection.cursor()
+            cursor.execute('DELETE FROM mfa_otp_codes WHERE expires_at < %s', (datetime.now(),))
+            deleted_count = cursor.rowcount
+            cursor.close()
+            print(f"Cleaned up {deleted_count} expired OTP codes")
+            return True
+        except Exception as e:
+            print(f"Error cleaning up expired OTPs: {e}")
+            return False
+# Initialize the SMS service
+
+sms_service = TwilioSMSService(db)
+
+# Updated MFA Endpoints (same as before, but now using PostgreSQL)
 @app.post("/auth/mfa/setup")
-async def setup_mfa(current_user: dict = Depends(get_authenticated_user)):
+async def setup_mfa(request: MFASetupRequest, current_user: dict = Depends(get_authenticated_user)):
     try:
         user_email = current_user["email"]
         
@@ -515,19 +652,36 @@ async def setup_mfa(current_user: dict = Depends(get_authenticated_user)):
                 detail="MFA is already enabled"
             )
 
-        from utils.key_func import generate_mfa_secret
-        secret = generate_mfa_secret()
-        
-        success = db.create_mfa_secret(user_email, secret)
+        # Validate phone number format (basic validation)
+        if not request.phone_number.startswith('+'):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Phone number must include country code (e.g., +1234567890)"
+            )
+
+        # Store phone number in database
+        success = db.create_mfa_phone(user_email, request.phone_number)
         if not success:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Failed to setup MFA"
             )
 
+        # Generate and send OTP for verification
+        otp = sms_service.generate_otp()
+        
+        if not sms_service.send_otp(request.phone_number, otp):
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to send verification SMS"
+            )
+        
+        # Store OTP for verification
+        sms_service.store_otp(user_email, otp)
+
         return {
-            "secret": secret,
-            "manual_entry_key": secret
+            "message": "Verification SMS sent to your phone number",
+            "phone_number": request.phone_number[-4:]  # Show only last 4 digits
         }
 
     except HTTPException:
@@ -545,24 +699,26 @@ async def verify_mfa_setup(
 ):
     try:
         user_email = current_user["email"]
-        secret = db.get_mfa_secret(user_email)
+        phone_number = db.get_mfa_phone(user_email)
         
-        if not secret:
+        if not phone_number:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="MFA not set up"
             )
 
-        from utils.key_func import verify_mfa_token, generate_backup_codes
-        if not verify_mfa_token(secret, request.token):
+        # Verify OTP
+        if not sms_service.verify_otp(user_email, request.token):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invalid MFA token"
+                detail="Invalid or expired OTP"
             )
-
+        
+        # Generate backup codes
         backup_codes = generate_backup_codes()
         backup_codes_str = ','.join(backup_codes)
         
+        # Enable MFA and store backup codes
         db.enable_mfa(user_email)
         db.store_backup_codes(user_email, backup_codes_str)
 
@@ -581,7 +737,7 @@ async def verify_mfa_setup(
 
 @app.post("/auth/mfa/login")
 async def mfa_login_step1(request: MFALoginRequest):
-    """Step 1: Validate email/password and return temporary token for MFA verification"""
+    """Step 1: Validate email/password and send SMS OTP"""
     try:
         user = db.authenticate_user(request.email, request.password)
         if not user:
@@ -596,14 +752,35 @@ async def mfa_login_step1(request: MFALoginRequest):
                 detail="MFA not enabled for this account"
             )
 
-        # Create a temporary token for MFA verification (short expiry)
+        # Get user's phone number
+        phone_number = db.get_mfa_phone(request.email)
+        if not phone_number:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="MFA phone number not found"
+            )
+
+        # Generate and send OTP
+        otp = sms_service.generate_otp()
+        
+        if not sms_service.send_otp(phone_number, otp):
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to send verification SMS"
+            )
+        
+        # Store OTP for verification
+        sms_service.store_otp(request.email, otp)
+
+        # Create a temporary token for MFA verification
         temp_token = create_temp_mfa_token(
             data={"sub": user["email"], "purpose": "mfa_verification"}
         )
         
         return {
             "temp_token": temp_token,
-            "message": "Email and password verified. Please provide MFA token.",
+            "message": "Verification SMS sent to your phone",
+            "phone_number": phone_number[-4:],  # Show only last 4 digits
             "requires_mfa": True
         }
 
@@ -617,7 +794,7 @@ async def mfa_login_step1(request: MFALoginRequest):
 
 @app.post("/auth/mfa/verify-token")
 async def mfa_login_step2(request: MFATokenVerifyRequest):
-    """Step 2: Verify MFA token and return access token"""
+    """Step 2: Verify SMS OTP and return access token"""
     try:
         # Verify the temporary token
         try:
@@ -636,7 +813,7 @@ async def mfa_login_step2(request: MFATokenVerifyRequest):
                 detail="Invalid or expired temporary token"
             )
 
-        # Get user and MFA secret
+        # Get user
         user = db.get_user_by_email(email)
         if not user:
             raise HTTPException(
@@ -644,17 +821,14 @@ async def mfa_login_step2(request: MFATokenVerifyRequest):
                 detail="User not found"
             )
 
-        secret = db.get_mfa_secret(email)
-        from utils.key_func import verify_mfa_token
-        
-        # Verify MFA token or backup code
-        token_valid = verify_mfa_token(secret, request.mfa_token)
+        # Verify OTP or backup code
+        otp_valid = sms_service.verify_otp(email, request.mfa_token)
         backup_valid = db.use_backup_code(email, request.mfa_token)
         
-        if not (token_valid or backup_valid):
+        if not (otp_valid or backup_valid):
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid MFA token"
+                detail="Invalid OTP or backup code"
             )
 
         # Create final access token
@@ -679,19 +853,6 @@ async def mfa_login_step2(request: MFATokenVerifyRequest):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"MFA token verification failed: {str(e)}"
         )
-
-# You'll also need to add this utility function for creating temporary tokens
-def create_temp_mfa_token(data: dict, expires_delta: timedelta = None):
-    """Create a temporary token for MFA verification (short-lived)"""
-    if expires_delta:
-        expire = datetime.utcnow() + expires_delta
-    else:
-        expire = datetime.utcnow() + timedelta(minutes=5)  # 5 minute expiry
-    
-    to_encode = data.copy()
-    to_encode.update({"exp": expire})
-    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-    return encoded_jwt
 
 @app.post("/auth/mfa/disable")
 async def disable_mfa(
@@ -730,9 +891,11 @@ async def get_mfa_status(current_user: dict = Depends(get_authenticated_user)):
     try:
         user_email = current_user["email"]
         is_enabled = db.is_mfa_enabled(user_email)
+        phone_number = db.get_mfa_phone(user_email) if is_enabled else None
         
         return {
-            "mfa_enabled": is_enabled
+            "mfa_enabled": is_enabled,
+            "phone_number": phone_number[-4:] if phone_number else None
         }
 
     except Exception as e:
@@ -741,11 +904,757 @@ async def get_mfa_status(current_user: dict = Depends(get_authenticated_user)):
             detail=f"Failed to get MFA status: {str(e)}"
         )
 
+# Optional: Add a cleanup endpoint to remove expired OTPs
+@app.post("/auth/mfa/cleanup")
+async def cleanup_expired_otps():
+    """Clean up expired OTP codes (can be called by a cron job)"""
+    try:
+        success = sms_service.cleanup_expired_otps()
+        if success:
+            return {"message": "Expired OTP codes cleaned up successfully"}
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to cleanup expired OTPs"
+            )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Cleanup failed: {str(e)}"
+        )
+
 # Add this import at the top of your main.py
 import base64
+from fastapi import WebSocket, WebSocketDisconnect, Depends, HTTPException, Query
+from typing import Dict, List, Optional
+import json
+import asyncio
+import base64
+from datetime import datetime
+import logging
+import io
+import threading
+import queue
+import time
 
-# Updated chat endpoint
-# Updated chat endpoint with audio support
+from utils.key_func import verify_token
+from database import DatabaseManager
+from gpt import chat_with_gpt
+from utils.voiceagent import speech_to_text_stream, generate_response_audio_base64, generate_audio_stream
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+class StreamingTranscriber:
+    def __init__(self, scan_id: str, user_email: str, manager):
+        self.scan_id = scan_id
+        self.user_email = user_email
+        self.manager = manager
+        self.audio_buffer = io.BytesIO()
+        self.is_recording = False
+        self.transcription_queue = queue.Queue()
+        self.processing_thread = None
+        self.last_chunk_time = time.time()
+        self.silence_threshold = 1.0  # seconds of silence before processing
+        
+    def add_audio_chunk(self, audio_chunk: bytes):
+        """Add audio chunk to buffer for processing"""
+        self.audio_buffer.write(audio_chunk)
+        self.last_chunk_time = time.time()
+        
+        if not self.is_recording:
+            self.is_recording = True
+            self.start_processing_thread()
+    
+    def start_processing_thread(self):
+        """Start background thread for transcription processing"""
+        if self.processing_thread and self.processing_thread.is_alive():
+            return
+            
+        self.processing_thread = threading.Thread(target=self._process_audio_continuously)
+        self.processing_thread.daemon = True
+        self.processing_thread.start()
+    
+    def _process_audio_continuously(self):
+        """Continuously process audio in background thread"""
+        while self.is_recording:
+            current_time = time.time()
+            
+            # Check if we have silence (no new chunks for threshold time)
+            if current_time - self.last_chunk_time > self.silence_threshold:
+                if self.audio_buffer.tell() > 0:
+                    # Process accumulated audio
+                    audio_data = self.audio_buffer.getvalue()
+                    if len(audio_data) > 1024:  # Minimum audio size
+                        asyncio.create_task(self._transcribe_and_respond(audio_data))
+                    
+                    # Reset buffer
+                    self.audio_buffer = io.BytesIO()
+                
+                self.is_recording = False
+                break
+            
+            time.sleep(0.1)  # Check every 100ms
+    
+    async def _transcribe_and_respond(self, audio_data: bytes):
+        """Transcribe audio and generate response"""
+        try:
+            # Send transcribing status
+            await self.manager.send_message(self.scan_id, self.user_email, {
+                "type": "transcribing",
+                "message": "Converting speech to text...",
+                "timestamp": datetime.now().isoformat()
+            })
+            
+            # Transcribe audio
+            transcription = speech_to_text_stream(audio_data)
+            
+            if not transcription or not transcription.strip():
+                await self.manager.send_message(self.scan_id, self.user_email, {
+                    "type": "transcription_empty",
+                    "message": "No speech detected"
+                })
+                return
+            
+            # Send transcription result
+            await self.manager.send_message(self.scan_id, self.user_email, {
+                "type": "transcription",
+                "message": transcription,
+                "timestamp": datetime.now().isoformat()
+            })
+            
+            # Generate and send response
+            await self._generate_chat_response(transcription)
+            
+        except Exception as e:
+            logger.error(f"Error in transcribe and respond: {e}")
+            await self.manager.send_message(self.scan_id, self.user_email, {
+                "type": "error",
+                "message": f"Error processing audio: {str(e)}"
+            })
+    
+    async def _generate_chat_response(self, user_message: str):
+        """Generate chat response for transcribed message"""
+        try:
+            db = DatabaseManager()
+            
+            # Store user message
+            db.add_chat_message(self.scan_id, "user", user_message)
+            
+            # Send generating status
+            await self.manager.send_message(self.scan_id, self.user_email, {
+                "type": "generating",
+                "message": "Generating response...",
+                "timestamp": datetime.now().isoformat()
+            })
+            
+            # Get chat history and generate response
+            chat_history = db.get_chat_history(self.scan_id)
+            
+            # Filter history and create chat-focused system message
+            filtered_history = []
+            original_analysis = None
+            
+            for msg in chat_history:
+                if msg["role"] == "system":
+                    continue
+                elif msg["role"] == "assistant" and msg["message"].startswith("{"):
+                    original_analysis = msg["message"]
+                    continue
+                else:
+                    filtered_history.append({
+                        "role": msg["role"],
+                        "content": msg["message"]
+                    })
+            
+            # Create system message for real-time chat
+            chat_system_message = {
+                "role": "system",
+                "content": (
+                    "You are NuFit — a fun, stylish fashion AI assistant. "
+                    "You are now in REAL-TIME VOICE CHAT MODE. "
+                    "IMPORTANT: Do NOT return JSON responses. Respond naturally in conversation. "
+                    "Keep responses very concise (1-2 sentences max) for real-time voice chat. "
+                    "Speak like a cool, supportive friend who knows fashion. "
+                    "Be helpful, encouraging, and give practical fashion advice. "
+                    "You previously analyzed this user's outfit and gave them a score. "
+                    "Reference that analysis when relevant, but respond conversationally. "
+                    "If user asks anything unrelated to fashion or styling tips, tell user to stick to the topic. "
+                    # "For voice chat, keep responses short, natural, and engaging."
+                )
+            }
+            
+            # Build GPT messages
+            gpt_messages = [chat_system_message]
+            
+            # Add context about original analysis
+            if original_analysis:
+                try:
+                    parsed_analysis = json.loads(original_analysis.strip())
+                    context_message = {
+                        "role": "assistant",
+                        "content": f"I previously analyzed your outfit and gave you a {parsed_analysis.get('score', 'N/A')} score. {parsed_analysis.get('stylist_says', '')}"
+                    }
+                    gpt_messages.append(context_message)
+                except:
+                    gpt_messages.append({
+                        "role": "assistant", 
+                        "content": "I previously analyzed your outfit and provided feedback."
+                    })
+            
+            # Add filtered chat history (keep only last 5 exchanges for real-time)
+            gpt_messages.extend(filtered_history[-10:])  # Last 10 messages
+            
+            # Generate response with shorter max tokens for voice
+            reply = chat_with_gpt(gpt_messages, max_tokens=100)
+            
+            if not reply:
+                await self.manager.send_message(self.scan_id, self.user_email, {
+                    "type": "error",
+                    "message": "Failed to generate response"
+                })
+                return
+            
+            # Store assistant's reply
+            db.add_chat_message(self.scan_id, "assistant", reply)
+            
+            # Send text response immediately
+            await self.manager.send_message(self.scan_id, self.user_email, {
+                "type": "response",
+                "message": reply,
+                "timestamp": datetime.now().isoformat()
+            })
+            
+            # Generate audio response asynchronously
+            asyncio.create_task(self._generate_and_send_audio_stream(reply))
+            
+        except Exception as e:
+            logger.error(f"Error generating chat response: {e}")
+            await self.manager.send_message(self.scan_id, self.user_email, {
+                "type": "error",
+                "message": f"Error generating response: {str(e)}"
+            })
+    
+    async def _generate_and_send_audio_stream(self, text: str):
+        """Generate streaming audio response"""
+        try:
+            # Send audio generation status
+            await self.manager.send_message(self.scan_id, self.user_email, {
+                "type": "generating_audio",
+                "message": "Generating audio response",
+                "timestamp": datetime.now().isoformat()
+            })
+            
+            # Generate audio stream
+            async for audio_chunk in generate_audio_stream(text, self.scan_id):
+                if audio_chunk:
+                    await self.manager.send_message(self.scan_id, self.user_email, {
+                        "type": "audio_chunk",
+                        "audio_base64": audio_chunk["audio_base64"],
+                        "chunk_index": audio_chunk["chunk_index"],
+                        "is_final": audio_chunk["is_final"],
+                        "timestamp": datetime.now().isoformat()
+                    })
+            
+            # Send audio completion
+            await self.manager.send_message(self.scan_id, self.user_email, {
+                "type": "audio_complete",
+                "text": text,
+                "timestamp": datetime.now().isoformat()
+            })
+            
+        except Exception as e:
+            logger.error(f"Error generating streaming audio: {e}")
+            await self.manager.send_message(self.scan_id, self.user_email, {
+                "type": "audio_error",
+                "message": f"Audio generation failed: {str(e)}"
+            })
+
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: Dict[str, WebSocket] = {}
+        self.user_sessions: Dict[str, Dict] = {}
+        self.transcribers: Dict[str, StreamingTranscriber] = {}
+
+    async def connect(self, websocket: WebSocket, scan_id: str, user_email: str):
+        await websocket.accept()
+        connection_id = f"{user_email}_{scan_id}"
+        self.active_connections[connection_id] = websocket
+        self.user_sessions[connection_id] = {
+            "scan_id": scan_id,
+            "user_email": user_email,
+            "connected_at": datetime.now(),
+            "is_processing": False,
+            "is_streaming": False
+        }
+        
+        # Create transcriber for this connection
+        self.transcribers[connection_id] = StreamingTranscriber(scan_id, user_email, self)
+        
+        logger.info(f"WebSocket connected: {connection_id}")
+
+    def disconnect(self, scan_id: str, user_email: str):
+        connection_id = f"{user_email}_{scan_id}"
+        if connection_id in self.active_connections:
+            del self.active_connections[connection_id]
+        if connection_id in self.user_sessions:
+            del self.user_sessions[connection_id]
+        if connection_id in self.transcribers:
+            del self.transcribers[connection_id]
+        logger.info(f"WebSocket disconnected: {connection_id}")
+
+    async def send_message(self, scan_id: str, user_email: str, message: dict):
+        connection_id = f"{user_email}_{scan_id}"
+        if connection_id in self.active_connections:
+            websocket = self.active_connections[connection_id]
+            try:
+                await websocket.send_text(json.dumps(message))
+            except Exception as e:
+                logger.error(f"Error sending message to {connection_id}: {e}")
+                self.disconnect(scan_id, user_email)
+
+    def is_processing(self, scan_id: str, user_email: str) -> bool:
+        connection_id = f"{user_email}_{scan_id}"
+        return self.user_sessions.get(connection_id, {}).get("is_processing", False)
+
+    def set_processing(self, scan_id: str, user_email: str, processing: bool):
+        connection_id = f"{user_email}_{scan_id}"
+        if connection_id in self.user_sessions:
+            self.user_sessions[connection_id]["is_processing"] = processing
+    
+    def is_streaming(self, scan_id: str, user_email: str) -> bool:
+        connection_id = f"{user_email}_{scan_id}"
+        return self.user_sessions.get(connection_id, {}).get("is_streaming", False)
+
+    def set_streaming(self, scan_id: str, user_email: str, streaming: bool):
+        connection_id = f"{user_email}_{scan_id}"
+        if connection_id in self.user_sessions:
+            self.user_sessions[connection_id]["is_streaming"] = streaming
+    
+    def get_transcriber(self, scan_id: str, user_email: str) -> Optional[StreamingTranscriber]:
+        connection_id = f"{user_email}_{scan_id}"
+        return self.transcribers.get(connection_id)
+
+manager = ConnectionManager()
+
+async def get_websocket_user(token: str) -> Optional[Dict]:
+    """Authenticate WebSocket connection using token"""
+    try:
+        
+        if not token:
+            return None
+        
+        payload = verify_token(token)
+        
+        if not payload:
+            return None
+        
+        email = payload.get("sub")
+        if not email:
+            return None
+        
+        db = DatabaseManager()
+        user = db.get_auth_user_by_email(email)
+        if not user:
+            return None
+        
+        # Check MFA requirements
+        mfa_required = payload.get("mfa_required", False)
+        mfa_verified = payload.get("mfa_verified", False)
+        
+        if mfa_required and not mfa_verified:
+            return None
+        return user
+    
+    except Exception as e:
+        return None
+
+@app.websocket("/ws/chat/{scan_id}")
+async def websocket_chat_endpoint(
+    websocket: WebSocket,
+    scan_id: str,
+    token: str = Query(...)
+):
+    """WebSocket endpoint for real-time chat with streaming voice support"""
+    
+    # Authenticate user
+    current_user = await get_websocket_user(token)
+    
+    if not current_user:
+        await websocket.close(code=1008, reason="Authentication failed")
+        return
+    
+    user_email = current_user["email"]
+    
+    db = DatabaseManager()
+    
+    # Verify scan access
+    scan = db.get_scan(scan_id)
+    
+    if not scan:
+        await websocket.close(code=1008, reason="Scan not found")
+        return
+    
+    user_profile = db.get_user(scan["user_id"])
+    
+    if not user_profile:
+        await websocket.close(code=1008, reason="User profile not found")
+        return
+    
+    if user_profile["email"] != user_email:
+        await websocket.close(code=1008, reason="Access denied")
+        return
+    
+    # Connect to WebSocket
+    await manager.connect(websocket, scan_id, user_email)
+    
+    # Send initial connection confirmation
+    await manager.send_message(scan_id, user_email, {
+        "type": "connection_established",
+        "message": "Connected to real-time streaming chat",
+        "scan_id": scan_id,
+        "capabilities": ["text", "audio_streaming", "real_time_transcription"],
+        "timestamp": datetime.now().isoformat()
+    })
+    
+    print("DEBUG: WebSocket connection established successfully")
+    
+    try:
+        while True:
+            # Receive message from client
+            data = await websocket.receive_text()
+            message_data = json.loads(data)
+            
+            message_type = message_data.get("type")
+            
+            if message_type == "start_streaming":
+                # Start audio streaming session
+                manager.set_streaming(scan_id, user_email, True)
+                await manager.send_message(scan_id, user_email, {
+                    "type": "streaming_started",
+                    "message": "Ready to receive audio stream",
+                    "timestamp": datetime.now().isoformat()
+                })
+                
+            elif message_type == "audio_chunk":
+                # Handle streaming audio chunk
+                if not manager.is_streaming(scan_id, user_email):
+                    continue
+                
+                audio_base64 = message_data.get("audio_data")
+                if audio_base64:
+                    try:
+                        audio_bytes = base64.b64decode(audio_base64)
+                        transcriber = manager.get_transcriber(scan_id, user_email)
+                        if transcriber:
+                            transcriber.add_audio_chunk(audio_bytes)
+                    except Exception as e:
+                        logger.error(f"Error processing audio chunk: {e}")
+                        
+            elif message_type == "stop_streaming":
+                manager.set_streaming(scan_id, user_email, False)
+
+                # Finalize any buffered audio
+                transcriber = manager.get_transcriber(scan_id, user_email)
+                if transcriber and transcriber.audio_buffer.tell() > 0:
+                    audio_data = transcriber.audio_buffer.getvalue()
+                    asyncio.create_task(transcriber._transcribe_and_respond(audio_data))
+                    transcriber.audio_buffer = io.BytesIO()
+                    transcriber.is_recording = False
+
+                await manager.send_message(scan_id, user_email, {
+                    "type": "streaming_stopped",
+                    "message": "Audio streaming stopped",
+                    "timestamp": datetime.now().isoformat()
+                })
+
+                
+            elif message_type == "text":
+                # Handle regular text message (fallback)
+                if manager.is_processing(scan_id, user_email):
+                    await manager.send_message(scan_id, user_email, {
+                        "type": "error",
+                        "message": "Already processing a request. Please wait."
+                    })
+                    continue
+                
+                manager.set_processing(scan_id, user_email, True)
+                try:
+                    await process_chat_message(scan_id, user_email, message_data, db)
+                finally:
+                    manager.set_processing(scan_id, user_email, False)
+                    
+            elif message_type == "audio":
+                # Handle complete audio message (legacy support)
+                if manager.is_processing(scan_id, user_email):
+                    await manager.send_message(scan_id, user_email, {
+                        "type": "error",
+                        "message": "Already processing a request. Please wait."
+                    })
+                    continue
+                
+                manager.set_processing(scan_id, user_email, True)
+                try:
+                    await process_chat_message(scan_id, user_email, message_data, db)
+                finally:
+                    manager.set_processing(scan_id, user_email, False)
+            
+            else:
+                await manager.send_message(scan_id, user_email, {
+                    "type": "error",
+                    "message": f"Unknown message type: {message_type}"
+                })
+                
+    except WebSocketDisconnect:
+        print("DEBUG: WebSocket disconnected")
+        manager.disconnect(scan_id, user_email)
+    except Exception as e:
+        print(f"DEBUG: WebSocket error: {e}")
+        logger.error(f"WebSocket error for {user_email}_{scan_id}: {e}")
+        await manager.send_message(scan_id, user_email, {
+            "type": "error",
+            "message": f"An error occurred: {str(e)}"
+        })
+        manager.disconnect(scan_id, user_email)
+
+async def process_chat_message(scan_id: str, user_email: str, message_data: dict, db: DatabaseManager):
+    """Process incoming chat message (text or audio) - legacy support"""
+    
+    try:
+        message_type = message_data.get("type")
+        user_message = None
+        
+        # Send processing status
+        await manager.send_message(scan_id, user_email, {
+            "type": "processing",
+            "message": "Processing your message..."
+        })
+        
+        if message_type == "text":
+            user_message = message_data.get("message", "").strip()
+            if not user_message:
+                await manager.send_message(scan_id, user_email, {
+                    "type": "error",
+                    "message": "Empty text message received"
+                })
+                return
+                
+        elif message_type == "audio":
+            # Handle base64 audio data
+            audio_base64 = message_data.get("audio_data")
+            if not audio_base64:
+                await manager.send_message(scan_id, user_email, {
+                    "type": "error",
+                    "message": "No audio data received"
+                })
+                return
+            
+            try:
+                # Decode base64 audio
+                audio_bytes = base64.b64decode(audio_base64)
+                
+                # Send transcription status
+                await manager.send_message(scan_id, user_email, {
+                    "type": "transcribing",
+                    "message": "Converting speech to text..."
+                })
+                
+                # Convert speech to text
+                user_message = speech_to_text_stream(audio_bytes)
+                
+                if not user_message:
+                    await manager.send_message(scan_id, user_email, {
+                        "type": "error",
+                        "message": "Failed to convert speech to text"
+                    })
+                    return
+                
+                # Send transcription result
+                await manager.send_message(scan_id, user_email, {
+                    "type": "transcription",
+                    "message": user_message
+                })
+                
+            except Exception as e:
+                await manager.send_message(scan_id, user_email, {
+                    "type": "error",
+                    "message": f"Error processing audio: {str(e)}"
+                })
+                return
+        else:
+            await manager.send_message(scan_id, user_email, {
+                "type": "error",
+                "message": "Invalid message type. Use 'text' or 'audio'"
+            })
+            return
+        
+        # Store user message in chat history
+        db.add_chat_message(scan_id, "user", user_message)
+        
+        # Send generating response status
+        await manager.send_message(scan_id, user_email, {
+            "type": "generating",
+            "message": "Generating response..."
+        })
+        
+        # Get chat history and generate response
+        chat_history = db.get_chat_history(scan_id)
+        
+        # Filter history and create chat-focused system message
+        filtered_history = []
+        original_analysis = None
+        
+        for msg in chat_history:
+            if msg["role"] == "system":
+                continue
+            elif msg["role"] == "assistant" and msg["message"].startswith("{"):
+                original_analysis = msg["message"]
+                continue
+            else:
+                filtered_history.append({
+                    "role": msg["role"],
+                    "content": msg["message"]
+                })
+        
+        # Create system message for chat mode
+        chat_system_message = {
+            "role": "system",
+            "content": (
+                "You are NuFit — a fun, stylish fashion AI assistant. "
+                "You are now in REAL-TIME CHAT MODE. "
+                "IMPORTANT: Do NOT return JSON responses. Respond naturally in conversation. "
+                "Keep responses concise (2-3 sentences max) for real-time chat. "
+                "Speak like a cool, supportive friend who knows fashion. "
+                "Be helpful, encouraging, and give practical fashion advice. "
+                "You previously analyzed this user's outfit and gave them a score. "
+                "Reference that analysis when relevant, but respond conversationally. "
+                "If user asks anything unrelated to fashion or styling tips, tell user to stick to the topic. "
+                "For real-time chat, keep responses short and engaging."
+            )
+        }
+        
+        # Build GPT messages
+        gpt_messages = [chat_system_message]
+        
+        # Add context about original analysis
+        if original_analysis:
+            try:
+                parsed_analysis = json.loads(original_analysis.strip())
+                context_message = {
+                    "role": "assistant",
+                    "content": f"I previously analyzed your outfit and gave you a {parsed_analysis.get('score', 'N/A')} score. {parsed_analysis.get('stylist_says', '')}"
+                }
+                gpt_messages.append(context_message)
+            except:
+                gpt_messages.append({
+                    "role": "assistant", 
+                    "content": "I previously analyzed your outfit and provided feedback."
+                })
+        
+        # Add filtered chat history
+        gpt_messages.extend(filtered_history)
+        
+        # Generate response
+        reply = chat_with_gpt(gpt_messages, max_tokens=150)
+        
+        if not reply:
+            await manager.send_message(scan_id, user_email, {
+                "type": "error",
+                "message": "Failed to generate response"
+            })
+            return
+        
+        # Store assistant's reply
+        db.add_chat_message(scan_id, "assistant", reply)
+        
+        # Send text response immediately
+        await manager.send_message(scan_id, user_email, {
+            "type": "response",
+            "message": reply,
+            "timestamp": datetime.now().isoformat()
+        })
+        
+        # Generate audio response asynchronously
+        asyncio.create_task(generate_and_send_audio(scan_id, user_email, reply))
+        
+    except Exception as e:
+        logger.error(f"Error processing chat message: {e}")
+        await manager.send_message(scan_id, user_email, {
+            "type": "error",
+            "message": f"An error occurred: {str(e)}"
+        })
+
+async def generate_and_send_audio(scan_id: str, user_email: str, text: str):
+    """Generate audio response and send it via WebSocket"""
+    try:
+        # Send audio generation status
+        await manager.send_message(scan_id, user_email, {
+            "type": "generating_audio",
+            "message": "Generating audio response..."
+        })
+        
+        # Generate audio (this might take a few seconds)
+        audio_data = generate_response_audio_base64(text, scan_id, "realtime_chat")
+        
+        if audio_data:
+            # Send audio response
+            await manager.send_message(scan_id, user_email, {
+                "type": "audio_response",
+                "audio_base64": audio_data["audio_base64"],
+                "audio_format": audio_data["audio_format"],
+                "filename": audio_data["filename"],
+                "text": text,
+                "timestamp": datetime.now().isoformat()
+            })
+        else:
+            await manager.send_message(scan_id, user_email, {
+                "type": "audio_error",
+                "message": "Failed to generate audio response"
+            })
+            
+    except Exception as e:
+        logger.error(f"Error generating audio: {e}")
+        await manager.send_message(scan_id, user_email, {
+            "type": "audio_error",
+            "message": f"Audio generation failed: {str(e)}"
+        })
+
+# Add these endpoints to your main FastAPI app
+@app.get("/ws/chat/status/{scan_id}")
+async def get_chat_status(scan_id: str, current_user: dict = Depends(get_authenticated_user)):
+    """Get current chat status for a scan"""
+    user_email = current_user["email"]
+    connection_id = f"{user_email}_{scan_id}"
+    
+    is_connected = connection_id in manager.active_connections
+    is_processing = manager.is_processing(scan_id, user_email) if is_connected else False
+    is_streaming = manager.is_streaming(scan_id, user_email) if is_connected else False
+    
+    return {
+        "scan_id": scan_id,
+        "is_connected": is_connected,
+        "is_processing": is_processing,
+        "is_streaming": is_streaming,
+        "active_connections": len(manager.active_connections)
+    }
+
+@app.post("/ws/chat/disconnect/{scan_id}")
+async def force_disconnect_chat(scan_id: str, current_user: dict = Depends(get_authenticated_user)):
+    """Force disconnect a WebSocket connection"""
+    user_email = current_user["email"]
+    connection_id = f"{user_email}_{scan_id}"
+    
+    if connection_id in manager.active_connections:
+        websocket = manager.active_connections[connection_id]
+        await websocket.close(code=1000, reason="Force disconnect")
+        manager.disconnect(scan_id, user_email)
+        return {"message": "Connection closed"}
+    else:
+        return {"message": "No active connection found"}
+
+# Previous chat endpoint
+
 @app.post("/chat/")
 async def chat_endpoint(
     scan_id: str = Form(...),
@@ -838,7 +1747,7 @@ async def chat_endpoint(
         chat_system_message = {
             "role": "system",
             "content": (
-                "You are NuFit — a fun, stylish fashion AI assistant. "
+                "You are NuFit — a fun, stylish fashion AI assistant who always responds in English, even if the user speaks another language."
                 "You are now in CHAT MODE, not analysis mode. "
                 "IMPORTANT: Do NOT return JSON responses. Respond naturally in conversation. "
                 "Speak like a cool, supportive friend who knows fashion. "
@@ -902,7 +1811,7 @@ async def chat_endpoint(
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-# Updated analyze-outfit endpoint
+
 # Updated analyze-outfit endpoint
 # @app.post("/analyze-outfit/")
 # async def analyze_outfit(
@@ -1137,6 +2046,83 @@ async def chat_endpoint(
 
 #         return response_data
 
+
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+import cv2
+import base64
+import os
+import json
+import re
+import uuid
+import shutil
+
+# Add this helper function for CPU-intensive tasks
+async def run_in_thread(func, *args, **kwargs):
+    """Run CPU-intensive function in thread pool"""
+    loop = asyncio.get_event_loop()
+    with ThreadPoolExecutor() as executor:
+        return await loop.run_in_executor(executor, func, *args, **kwargs)
+
+# Optimized frame extraction function
+def extract_frames_to_base64(video_path: str, exclude_start: int = 4, exclude_end: int = 7, max_frames: int = 6) -> tuple:
+    """Extract frames from video and return as base64 encoded messages directly"""
+    image_messages = []
+    frame_paths = []  # For database storage
+    
+    try:
+        cap = cv2.VideoCapture(video_path)
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        
+        if fps <= 0 or total_frames <= 0:
+            cap.release()
+            return image_messages, frame_paths
+        
+        # Calculate frame indices to exclude
+        exclude_start_frame = int(exclude_start * fps)
+        exclude_end_frame = int(exclude_end * fps)
+        
+        # Get frames to extract (excluding the specified range)
+        frame_indices = []
+        for i in range(0, total_frames):
+            if i < exclude_start_frame or i > exclude_end_frame:
+                frame_indices.append(i)
+        
+        # Limit to max_frames
+        if len(frame_indices) > max_frames:
+            # Distribute frames evenly
+            step = len(frame_indices) // max_frames
+            frame_indices = frame_indices[::step][:max_frames]
+        
+        # Extract frames
+        for idx, frame_idx in enumerate(frame_indices):
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+            ret, frame = cap.read()
+            
+            if ret:
+                # Encode frame directly to base64
+                _, buffer = cv2.imencode('.jpg', frame)
+                frame_base64 = base64.b64encode(buffer).decode('utf-8')
+                
+                image_messages.append({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:image/jpeg;base64,{frame_base64}"
+                    }
+                })
+                
+                # Create frame path for database (these won't be written to disk)
+                frame_paths.append(f"frame_{idx+1:03d}.jpg")
+        
+        cap.release()
+        
+    except Exception as e:
+        print(f"Error extracting frames: {e}")
+    
+    return image_messages, frame_paths
+
+
 @app.post("/analyze-outfit/")
 async def analyze_outfit(
     video: UploadFile = File(None),
@@ -1184,11 +2170,17 @@ async def analyze_outfit(
             with open(video_path, "wb") as buffer:
                 shutil.copyfileobj(video.file, buffer)
 
-            # Extract frames
-            extract_frames(video_path, scan_frame_dir)
+            # Extract frames excluding 4-7 second range (6 frames total)
+            # This will create a subdirectory with the extracted frames
+            actual_frames_dir = extract_frames(video_path, scan_frame_dir, exclude_start=4, exclude_end=7)
+            
+            # Update scan_frame_dir to point to the actual frames directory
+            scan_frame_dir = actual_frames_dir
             
             # Store video path for database
             file_path = video_path
+            
+            print(f"Video frames extracted to: {scan_frame_dir}")
         
         # Handle photo input
         else:  # photo is provided
@@ -1209,7 +2201,7 @@ async def analyze_outfit(
             # Store photo path for database (use the photo path as file_path)
             file_path = photo_path
 
-        # Load image messages (max 5 for video, 1 for photo)
+        # Load image messages - now will have exactly 6 frames for 10-sec video
         image_messages = load_image_messages(scan_frame_dir)
         if not image_messages:
             return JSONResponse(
@@ -1220,7 +2212,9 @@ async def analyze_outfit(
         # Get frame paths for database storage
         frame_paths = []
         image_extensions = (".jpg", ".jpeg", ".png")
-        for filename in sorted(os.listdir(scan_frame_dir))[:5]:
+        # For videos, we now have exactly 6 frames; for photos, still 1
+        max_frames = 6 if video else 1
+        for filename in sorted(os.listdir(scan_frame_dir))[:max_frames]:
             if filename.lower().endswith(image_extensions):
                 frame_paths.append(os.path.join(scan_frame_dir, filename))
 
@@ -1228,9 +2222,8 @@ async def analyze_outfit(
         system_message = {
     "role": "system",
     "content": (
-        "You are NuFit — a fun, stylish fashion AI that gives punchy feedback and outfit ratings.\n"
+        "You are NuFit — a fun, stylish fashion AI assistant who always responds in English, even if the user speaks another language."
         "Speak like a cool cousin — fun, honest, brutally real, and baby-simple.\n\n"
-
         "INITIAL OUTFIT ANALYSIS MODE:\n"
         "When analyzing outfit images, first determine how many people are present. Focus on the primary subject, typically the person in the foreground or center of the image. A 'person' is defined as a human figure with clear facial features or a distinct body outline. Ignore reflections, shadows, mannequins, posters, or background figures that are not the primary subject.\n\n"
 
@@ -1815,6 +2808,486 @@ async def create_user():
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
+
+# Pose Guidance
+
+# Add this import at the top of your main.py
+import base64
+from fastapi import WebSocket, WebSocketDisconnect, Depends, HTTPException, Query
+from typing import Dict, List, Optional
+import json
+import asyncio
+import base64
+from datetime import datetime
+import logging
+import io
+import threading
+import queue
+import time
+from enum import Enum
+
+from utils.key_func import verify_token
+from database import DatabaseManager
+from gpt import chat_with_gpt
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+class ScanStage(str, Enum):
+    FRONT = "front"
+    SIDE = "side"
+    BACK = "back"
+
+class ScanGuidanceManager:
+    def __init__(self):
+        self.active_connections: Dict[str, WebSocket] = {}
+        self.scan_sessions: Dict[str, Dict] = {}
+        
+    async def connect(self, websocket: WebSocket, scan_id: str, user_email: str):
+        await websocket.accept()
+        connection_id = f"{user_email}_{scan_id}"
+        self.active_connections[connection_id] = websocket
+        self.scan_sessions[connection_id] = {
+            "scan_id": scan_id,
+            "user_email": user_email,
+            "connected_at": datetime.now(),
+            "current_stage": ScanStage.FRONT,
+            "progress": {
+                "front": {"correct_frames": 0, "total_frames": 0, "completed": False},
+                "side": {"correct_frames": 0, "total_frames": 0, "completed": False},
+                "back": {"correct_frames": 0, "total_frames": 0, "completed": False}
+            },
+            "total_correct_frames": 0,
+            "scan_completed": False,
+            "is_processing": False
+        }
+        
+        logger.info(f"Scan guidance WebSocket connected: {connection_id}")
+
+    def disconnect(self, scan_id: str, user_email: str):
+        connection_id = f"{user_email}_{scan_id}"
+        if connection_id in self.active_connections:
+            del self.active_connections[connection_id]
+        if connection_id in self.scan_sessions:
+            del self.scan_sessions[connection_id]
+        logger.info(f"Scan guidance WebSocket disconnected: {connection_id}")
+
+    async def send_message(self, scan_id: str, user_email: str, message: dict):
+        connection_id = f"{user_email}_{scan_id}"
+        if connection_id in self.active_connections:
+            websocket = self.active_connections[connection_id]
+            try:
+                await websocket.send_text(json.dumps(message))
+            except Exception as e:
+                logger.error(f"Error sending message to {connection_id}: {e}")
+                self.disconnect(scan_id, user_email)
+
+    def get_session(self, scan_id: str, user_email: str) -> Optional[Dict]:
+        connection_id = f"{user_email}_{scan_id}"
+        return self.scan_sessions.get(connection_id)
+    
+    def update_progress(self, scan_id: str, user_email: str, stage: str, is_correct: bool):
+        connection_id = f"{user_email}_{scan_id}"
+        if connection_id not in self.scan_sessions:
+            return
+        
+        session = self.scan_sessions[connection_id]
+        progress = session["progress"][stage]
+        
+        progress["total_frames"] += 1
+        
+        if is_correct:
+            progress["correct_frames"] += 1
+            session["total_correct_frames"] += 1
+            
+            # Check if stage is completed (5 correct frames)
+            if progress["correct_frames"] >= 5 and not progress["completed"]:
+                progress["completed"] = True
+                # Move to next stage
+                if stage == "front":
+                    session["current_stage"] = ScanStage.SIDE
+                elif stage == "side":
+                    session["current_stage"] = ScanStage.BACK
+                elif stage == "back":
+                    session["scan_completed"] = True
+        
+        return session
+    
+    def is_scan_completed(self, scan_id: str, user_email: str) -> bool:
+        session = self.get_session(scan_id, user_email)
+        if not session:
+            return False
+        
+        return (session["progress"]["front"]["completed"] and 
+                session["progress"]["side"]["completed"] and 
+                session["progress"]["back"]["completed"])
+
+# Create scan guidance manager instance
+guidance_manager = ScanGuidanceManager()
+
+class FrameProcessor:
+    def __init__(self):
+        self.processing_queue = asyncio.Queue()
+        
+    async def analyze_frame(self, frame_base64: str, current_stage: str) -> Dict:
+        """Analyze frame using GPT-4o to determine orientation and correctness"""
+        try:
+            # Create GPT-4o prompt for frame analysis
+            system_message = {
+                "role": "system",
+                "content": (
+                    "You are a fashion AI assistant that analyzes user poses for outfit scanning. "
+                    f"The user is currently supposed to be showing their {current_stage} view. "
+                    "Analyze the image and determine:\n"
+                    "1. What orientation/pose the person is in (front, side, back, or other)\n"
+                    "2. Whether this matches the expected orientation\n"
+                    "3. Quality of the pose (is the person fully visible, standing straight, etc.)\n"
+                    "4. Provide brief guidance for improvement if needed\n\n"
+                    "Respond with a JSON object containing:\n"
+                    "{\n"
+                    '  "detected_orientation": "front|side|back|other",\n'
+                    '  "is_correct": true|false,\n'
+                    '  "confidence": 0.0-1.0,\n'
+                    '  "guidance_message": "Brief instruction for the user",\n'
+                    '  "pose_quality": "good|needs_adjustment|poor"\n'
+                    "}"
+                )
+            }
+            
+            user_message = {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": f"Please analyze this image. The user should be showing their {current_stage} view."
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/jpeg;base64,{frame_base64}"
+                        }
+                    }
+                ]
+            }
+            
+            # Call GPT-4o with vision capabilities
+            messages = [system_message, user_message]
+            response = chat_with_gpt(messages, max_tokens=200, model="gpt-4o")
+            
+            if not response:
+                return self._default_response("Error analyzing image")
+            
+            # Try to parse JSON response
+            try:
+                # Clean response if it has markdown formatting
+                clean_response = response.strip()
+                if clean_response.startswith("```json"):
+                    clean_response = clean_response[7:]
+                if clean_response.endswith("```"):
+                    clean_response = clean_response[:-3]
+                
+                result = json.loads(clean_response.strip())
+                
+                # Validate required fields
+                required_fields = ["detected_orientation", "is_correct", "guidance_message"]
+                if all(field in result for field in required_fields):
+                    return result
+                else:
+                    return self._default_response("Invalid response format")
+                    
+            except json.JSONDecodeError:
+                # If JSON parsing fails, create a basic response
+                return self._parse_text_response(response, current_stage)
+                
+        except Exception as e:
+            logger.error(f"Error analyzing frame: {e}")
+            return self._default_response(f"Analysis error: {str(e)}")
+    
+    def _default_response(self, message: str) -> Dict:
+        """Return default response when analysis fails"""
+        return {
+            "detected_orientation": "unknown",
+            "is_correct": False,
+            "confidence": 0.0,
+            "guidance_message": message,
+            "pose_quality": "needs_adjustment"
+        }
+    
+    def _parse_text_response(self, response: str, current_stage: str) -> Dict:
+        """Parse text response when JSON parsing fails"""
+        response_lower = response.lower()
+        
+        # Detect orientation
+        detected_orientation = "other"
+        if "front" in response_lower:
+            detected_orientation = "front"
+        elif "side" in response_lower:
+            detected_orientation = "side"
+        elif "back" in response_lower:
+            detected_orientation = "back"
+        
+        # Determine correctness
+        is_correct = (detected_orientation == current_stage and 
+                     ("good" in response_lower or "correct" in response_lower))
+        
+        return {
+            "detected_orientation": detected_orientation,
+            "is_correct": is_correct,
+            "confidence": 0.7 if is_correct else 0.3,
+            "guidance_message": response[:100] + "..." if len(response) > 100 else response,
+            "pose_quality": "good" if is_correct else "needs_adjustment"
+        }
+
+# Create frame processor instance
+frame_processor = FrameProcessor()
+
+@app.websocket("/ws/scan-guidance/{scan_id}")
+async def websocket_scan_guidance_endpoint(
+    websocket: WebSocket,
+    scan_id: str,
+    token: str = Query(...)
+):
+    """WebSocket endpoint for real-time scan guidance with frame analysis"""
+    
+    # Authenticate user
+    current_user = await get_websocket_user(token)
+    if not current_user:
+        await websocket.close(code=1008, reason="Authentication failed")
+        return
+    
+    user_email = current_user["email"]
+    db = DatabaseManager()
+    
+    # Verify scan access
+    scan = db.get_scan(scan_id)
+    if not scan:
+        await websocket.close(code=1008, reason="Scan not found")
+        return
+    
+    user_profile = db.get_user(scan["user_id"])
+    if not user_profile or user_profile["email"] != user_email:
+        await websocket.close(code=1008, reason="Access denied")
+        return
+    
+    # Connect to WebSocket
+    await guidance_manager.connect(websocket, scan_id, user_email)
+    
+    # Send initial guidance
+    await guidance_manager.send_message(scan_id, user_email, {
+        "type": "guidance_started",
+        "message": "Scan guidance session started",
+        "scan_id": scan_id,
+        "current_stage": "front",
+        "instructions": "Please stand facing the camera for a front view of your outfit",
+        "progress": {
+            "front": {"correct_frames": 0, "required_frames": 5, "completed": False},
+            "side": {"correct_frames": 0, "required_frames": 5, "completed": False},
+            "back": {"correct_frames": 0, "required_frames": 5, "completed": False}
+        },
+        "timestamp": datetime.now().isoformat()
+    })
+    
+    try:
+        while True:
+            # Receive message from client
+            data = await websocket.receive_text()
+            message_data = json.loads(data)
+            
+            message_type = message_data.get("type")
+            session = guidance_manager.get_session(scan_id, user_email)
+            
+            if not session:
+                await guidance_manager.send_message(scan_id, user_email, {
+                    "type": "error",
+                    "message": "Session not found"
+                })
+                continue
+            
+            if message_type == "frame":
+                # Handle incoming frame for analysis
+                if session["is_processing"]:
+                    continue  # Skip if already processing
+                
+                frame_base64 = message_data.get("frame_data")
+                if not frame_base64:
+                    await guidance_manager.send_message(scan_id, user_email, {
+                        "type": "error",
+                        "message": "No frame data received"
+                    })
+                    continue
+                
+                # Set processing flag
+                session["is_processing"] = True
+                
+                try:
+                    # Analyze frame
+                    current_stage = session["current_stage"]
+                    analysis_result = await frame_processor.analyze_frame(frame_base64, current_stage)
+                    
+                    # Update progress
+                    is_correct = analysis_result.get("is_correct", False)
+                    updated_session = guidance_manager.update_progress(scan_id, user_email, current_stage, is_correct)
+                    
+                    # Prepare response
+                    response_data = {
+                        "type": "frame_analysis",
+                        "scan_id": scan_id,
+                        "current_stage": updated_session["current_stage"],
+                        "detected_orientation": analysis_result.get("detected_orientation"),
+                        "is_correct": 1 if is_correct else 0,  # Flag as requested
+                        "confidence": analysis_result.get("confidence", 0.0),
+                        "guidance_message": analysis_result.get("guidance_message"),
+                        "pose_quality": analysis_result.get("pose_quality"),
+                        "progress": updated_session["progress"],
+                        "total_correct_frames": updated_session["total_correct_frames"],
+                        "scan_completed": updated_session["scan_completed"],
+                        "timestamp": datetime.now().isoformat()
+                    }
+                    
+                    # Check for stage completion
+                    if updated_session["progress"][current_stage]["completed"] and current_stage != updated_session["current_stage"]:
+                        response_data["stage_completed"] = current_stage
+                        response_data["next_stage"] = updated_session["current_stage"]
+                        
+                        # Add stage-specific instructions
+                        stage_instructions = {
+                            "side": "Great! Now please turn to show your side profile",
+                            "back": "Excellent! Now please turn around to show the back of your outfit"
+                        }
+                        response_data["next_stage_instructions"] = stage_instructions.get(updated_session["current_stage"], "")
+                    
+                    # Check for complete scan
+                    if guidance_manager.is_scan_completed(scan_id, user_email):
+                        response_data["type"] = "scan_complete"
+                        response_data["message"] = "Scan completed successfully! Processing your outfit analysis..."
+                        
+                        # Trigger backend analysis here
+                        asyncio.create_task(trigger_outfit_analysis(scan_id, user_email))
+                    
+                    await guidance_manager.send_message(scan_id, user_email, response_data)
+                    
+                finally:
+                    session["is_processing"] = False
+            
+            elif message_type == "reset_scan":
+                # Reset scan progress
+                session["current_stage"] = ScanStage.FRONT
+                session["progress"] = {
+                    "front": {"correct_frames": 0, "total_frames": 0, "completed": False},
+                    "side": {"correct_frames": 0, "total_frames": 0, "completed": False},
+                    "back": {"correct_frames": 0, "total_frames": 0, "completed": False}
+                }
+                session["total_correct_frames"] = 0
+                session["scan_completed"] = False
+                
+                await guidance_manager.send_message(scan_id, user_email, {
+                    "type": "scan_reset",
+                    "message": "Scan progress reset",
+                    "current_stage": "front",
+                    "instructions": "Please stand facing the camera for a front view of your outfit",
+                    "progress": session["progress"],
+                    "timestamp": datetime.now().isoformat()
+                })
+            
+            elif message_type == "get_status":
+                # Send current status
+                await guidance_manager.send_message(scan_id, user_email, {
+                    "type": "status_update",
+                    "scan_id": scan_id,
+                    "current_stage": session["current_stage"],
+                    "progress": session["progress"],
+                    "total_correct_frames": session["total_correct_frames"],
+                    "scan_completed": session["scan_completed"],
+                    "timestamp": datetime.now().isoformat()
+                })
+            
+            else:
+                await guidance_manager.send_message(scan_id, user_email, {
+                    "type": "error",
+                    "message": f"Unknown message type: {message_type}"
+                })
+                
+    except WebSocketDisconnect:
+        guidance_manager.disconnect(scan_id, user_email)
+    except Exception as e:
+        logger.error(f"Scan guidance WebSocket error for {user_email}_{scan_id}: {e}")
+        await guidance_manager.send_message(scan_id, user_email, {
+            "type": "error",
+            "message": f"An error occurred: {str(e)}"
+        })
+        guidance_manager.disconnect(scan_id, user_email)
+
+async def trigger_outfit_analysis(scan_id: str, user_email: str):
+    """Trigger backend outfit analysis when scan is completed"""
+    try:
+        # Send analysis started notification
+        await guidance_manager.send_message(scan_id, user_email, {
+            "type": "analysis_started",
+            "message": "Starting outfit analysis...",
+            "timestamp": datetime.now().isoformat()
+        })
+        
+        # Here you would trigger your existing outfit analysis pipeline
+        # This is where you'd send the collected video/frames for processing
+        
+        # Placeholder for actual analysis call
+        # analysis_result = await process_outfit_analysis(scan_id)
+        
+        # For now, send a completion message
+        await guidance_manager.send_message(scan_id, user_email, {
+            "type": "analysis_complete",
+            "message": "Outfit analysis completed! Check your results.",
+            "timestamp": datetime.now().isoformat()
+        })
+        
+    except Exception as e:
+        logger.error(f"Error triggering outfit analysis: {e}")
+        await guidance_manager.send_message(scan_id, user_email, {
+            "type": "analysis_error",
+            "message": f"Analysis failed: {str(e)}",
+            "timestamp": datetime.now().isoformat()
+        })
+
+# Additional REST endpoints for scan guidance management
+@app.get("/ws/scan-guidance/status/{scan_id}")
+async def get_scan_guidance_status(scan_id: str, current_user: dict = Depends(get_authenticated_user)):
+    """Get current scan guidance status"""
+    user_email = current_user["email"]
+    session = guidance_manager.get_session(scan_id, user_email)
+    
+    if not session:
+        return {
+            "scan_id": scan_id,
+            "is_connected": False,
+            "message": "No active guidance session"
+        }
+    
+    return {
+        "scan_id": scan_id,
+        "is_connected": True,
+        "current_stage": session["current_stage"],
+        "progress": session["progress"],
+        "total_correct_frames": session["total_correct_frames"],
+        "scan_completed": session["scan_completed"],
+        "is_processing": session["is_processing"]
+    }
+
+@app.post("/ws/scan-guidance/disconnect/{scan_id}")
+async def force_disconnect_scan_guidance(scan_id: str, current_user: dict = Depends(get_authenticated_user)):
+    """Force disconnect a scan guidance WebSocket connection"""
+    user_email = current_user["email"]
+    connection_id = f"{user_email}_{scan_id}"
+    
+    if connection_id in guidance_manager.active_connections:
+        websocket = guidance_manager.active_connections[connection_id]
+        await websocket.close(code=1000, reason="Force disconnect")
+        guidance_manager.disconnect(scan_id, user_email)
+        return {"message": "Scan guidance connection closed"}
+    else:
+        return {"message": "No active scan guidance connection found"}
+    
+
 # Maintenance endpoints
 @app.post("/admin/cleanup-codes")
 async def cleanup_expired_codes():
@@ -1829,7 +3302,7 @@ async def cleanup_expired_codes():
 async def startup_event():
     # Initialize database tables
     db.init_db()
-    
+
     # Clean up expired codes on startup
     try:
         db.cleanup_expired_codes()

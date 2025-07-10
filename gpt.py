@@ -15,7 +15,7 @@ if api_key:
     # Create OpenAI client
     client = OpenAI(api_key=api_key)
 else:
-    print("❌ API Key not found in environment variables")
+    print("API Key not found in environment variables")
     client = None
 
 # Function to encode image to base64
@@ -64,30 +64,30 @@ def load_image_messages(folder_path: str, max_images: int = 5) -> List[Dict]:
     return image_messages
 
 # Send request to GPT-4o API using the new OpenAI client
-def chat_with_gpt(messages: List[Dict], model: str = "gpt-4o", max_tokens: int = 500) -> Optional[str]:
+def chat_with_gpt(messages: List[Dict], model: str = "gpt-4o", max_tokens: int = 300) -> Optional[str]:
+
     """Send messages to GPT API and return response"""
     if not client:
-        print("❌ OpenAI client not initialized - API key missing")
+        print("OpenAI client not initialized - API key missing")
         return None
-        
     try:
         response = client.chat.completions.create(
             model=model,
             messages=messages,
             max_tokens=max_tokens,
-            temperature=0.7
+            temperature=0.5
         )
         
         return response.choices[0].message.content
         
     except AuthenticationError:
-        print("❌ Invalid API key. Please check your key.")
+        print("Invalid API key. Please check your key.")
         return None
     except RateLimitError as e:
-        print(f"❌ Rate limit or billing error: {e}")
+        print(f"Rate limit or billing error: {e}")
         return None
     except OpenAIError as e:
-        print(f"❌ OpenAI API error: {e}")
+        print(f"OpenAI API error: {e}")
         return None
     except Exception as e:
         print(f"Error communicating with GPT: {e}")

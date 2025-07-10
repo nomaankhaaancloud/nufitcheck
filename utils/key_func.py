@@ -1,6 +1,7 @@
 import os
 import jwt
 import random
+import string
 from datetime import datetime, timedelta
 from typing import Optional, Dict
 from dotenv import load_dotenv
@@ -149,3 +150,28 @@ def create_access_token_with_mfa(data: Dict, expires_delta: Optional[timedelta] 
     except Exception as e:
         print(f"Error creating access token with MFA: {e}")
         return None
+
+def create_temp_mfa_token(data: Dict, expires_minutes: int = 10) -> str:
+    """Create a short-lived MFA token (e.g., 10 minutes)"""
+    to_encode = data.copy()
+    expire = datetime.utcnow() + timedelta(minutes=expires_minutes)
+    to_encode.update({
+        "exp": expire,
+        "iat": datetime.utcnow(),
+        "type": "mfa_temp"
+    })
+
+    try:
+        encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+        return encoded_jwt
+    except Exception as e:
+        print(f"Error creating MFA temp token: {e}")
+        return None
+    
+def generate_backup_codes(count: int = 10) -> list:
+    """Generate backup codes for MFA"""
+    codes = []
+    for _ in range(count):
+        code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
+        codes.append(code)
+    return codes
