@@ -15,7 +15,7 @@ from database import DatabaseManager
 from utils.mailservice import send_password_reset_email, log_password_reset_code
 from utils.authmiddleware import get_current_user, get_optional_current_user, get_authenticated_user
 from utils.key_func import create_access_token, generate_4_digit_code, create_access_token_with_mfa, create_temp_mfa_token, generate_backup_codes
-from utils.voiceagent import generate_audio
+from utils.voiceagent import generate_audio, speech_to_text_stream
 from dotenv import load_dotenv
 import base64
 from utils.key_func import SECRET_KEY, ALGORITHM
@@ -26,6 +26,9 @@ from utils.voiceagent import speech_to_text, generate_response_audio_base64
 import random
 import string
 from fastapi.middleware.cors import CORSMiddleware
+import logging
+logging.basicConfig(level=logging.WARNING)
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 
@@ -923,27 +926,39 @@ async def cleanup_expired_otps():
             detail=f"Cleanup failed: {str(e)}"
         )
 
-# Add this import at the top of your main.py
-import base64
-from fastapi import WebSocket, WebSocketDisconnect, Depends, HTTPException, Query
-from typing import Dict, List, Optional
-import json
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import asyncio
+import json
+import uuid
+import os
+import shutil
+import re
 import base64
-from datetime import datetime
+import traceback
+from typing import Dict, Any, Optional
+from fastapi import WebSocket, WebSocketDisconnect, FastAPI, Query
+from fastapi.responses import JSONResponse
 import logging
 import io
 import threading
 import queue
 import time
+from datetime import datetime
 
-from utils.key_func import verify_token
-from database import DatabaseManager
-from gpt import chat_with_gpt
-from utils.voiceagent import speech_to_text_stream, generate_response_audio_base64, generate_audio_stream
-
-# Configure logging
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class StreamingTranscriber:
@@ -955,11 +970,8 @@ class StreamingTranscriber:
         self.is_recording = False
         self.transcription_queue = queue.Queue()
         self.processing_thread = None
-        self.last_chunk_time = time.time()
-        self.silence_threshold = 1.0  # seconds of silence before processing
         
     def add_audio_chunk(self, audio_chunk: bytes):
-        """Add audio chunk to buffer for processing"""
         self.audio_buffer.write(audio_chunk)
         self.last_chunk_time = time.time()
         
@@ -968,7 +980,6 @@ class StreamingTranscriber:
             self.start_processing_thread()
     
     def start_processing_thread(self):
-        """Start background thread for transcription processing"""
         if self.processing_thread and self.processing_thread.is_alive():
             return
             
@@ -977,37 +988,17 @@ class StreamingTranscriber:
         self.processing_thread.start()
     
     def _process_audio_continuously(self):
-        """Continuously process audio in background thread"""
         while self.is_recording:
-            current_time = time.time()
-            
-            # Check if we have silence (no new chunks for threshold time)
-            if current_time - self.last_chunk_time > self.silence_threshold:
-                if self.audio_buffer.tell() > 0:
-                    # Process accumulated audio
-                    audio_data = self.audio_buffer.getvalue()
-                    if len(audio_data) > 1024:  # Minimum audio size
-                        asyncio.create_task(self._transcribe_and_respond(audio_data))
-                    
-                    # Reset buffer
-                    self.audio_buffer = io.BytesIO()
-                
-                self.is_recording = False
-                break
-            
-            time.sleep(0.1)  # Check every 100ms
+            time.sleep(0.1)
     
     async def _transcribe_and_respond(self, audio_data: bytes):
-        """Transcribe audio and generate response"""
         try:
-            # Send transcribing status
             await self.manager.send_message(self.scan_id, self.user_email, {
                 "type": "transcribing",
                 "message": "Converting speech to text...",
                 "timestamp": datetime.now().isoformat()
             })
             
-            # Transcribe audio
             transcription = speech_to_text_stream(audio_data)
             
             if not transcription or not transcription.strip():
@@ -1017,14 +1008,12 @@ class StreamingTranscriber:
                 })
                 return
             
-            # Send transcription result
             await self.manager.send_message(self.scan_id, self.user_email, {
                 "type": "transcription",
                 "message": transcription,
                 "timestamp": datetime.now().isoformat()
             })
             
-            # Generate and send response
             await self._generate_chat_response(transcription)
             
         except Exception as e:
@@ -1035,24 +1024,19 @@ class StreamingTranscriber:
             })
     
     async def _generate_chat_response(self, user_message: str):
-        """Generate chat response for transcribed message"""
         try:
             db = DatabaseManager()
             
-            # Store user message
             db.add_chat_message(self.scan_id, "user", user_message)
             
-            # Send generating status
             await self.manager.send_message(self.scan_id, self.user_email, {
                 "type": "generating",
                 "message": "Generating response...",
                 "timestamp": datetime.now().isoformat()
             })
             
-            # Get chat history and generate response
             chat_history = db.get_chat_history(self.scan_id)
             
-            # Filter history and create chat-focused system message
             filtered_history = []
             original_analysis = None
             
@@ -1068,7 +1052,6 @@ class StreamingTranscriber:
                         "content": msg["message"]
                     })
             
-            # Create system message for real-time chat
             chat_system_message = {
                 "role": "system",
                 "content": (
@@ -1081,14 +1064,11 @@ class StreamingTranscriber:
                     "You previously analyzed this user's outfit and gave them a score. "
                     "Reference that analysis when relevant, but respond conversationally. "
                     "If user asks anything unrelated to fashion or styling tips, tell user to stick to the topic. "
-                    # "For voice chat, keep responses short, natural, and engaging."
                 )
             }
             
-            # Build GPT messages
             gpt_messages = [chat_system_message]
             
-            # Add context about original analysis
             if original_analysis:
                 try:
                     parsed_analysis = json.loads(original_analysis.strip())
@@ -1103,10 +1083,8 @@ class StreamingTranscriber:
                         "content": "I previously analyzed your outfit and provided feedback."
                     })
             
-            # Add filtered chat history (keep only last 5 exchanges for real-time)
-            gpt_messages.extend(filtered_history[-10:])  # Last 10 messages
+            gpt_messages.extend(filtered_history[-10:])
             
-            # Generate response with shorter max tokens for voice
             reply = chat_with_gpt(gpt_messages, max_tokens=100)
             
             if not reply:
@@ -1116,17 +1094,14 @@ class StreamingTranscriber:
                 })
                 return
             
-            # Store assistant's reply
             db.add_chat_message(self.scan_id, "assistant", reply)
             
-            # Send text response immediately
             await self.manager.send_message(self.scan_id, self.user_email, {
                 "type": "response",
                 "message": reply,
                 "timestamp": datetime.now().isoformat()
             })
             
-            # Generate audio response asynchronously
             asyncio.create_task(self._generate_and_send_audio_stream(reply))
             
         except Exception as e:
@@ -1137,16 +1112,13 @@ class StreamingTranscriber:
             })
     
     async def _generate_and_send_audio_stream(self, text: str):
-        """Generate streaming audio response"""
         try:
-            # Send audio generation status
             await self.manager.send_message(self.scan_id, self.user_email, {
                 "type": "generating_audio",
                 "message": "Generating audio response",
                 "timestamp": datetime.now().isoformat()
             })
             
-            # Generate audio stream
             async for audio_chunk in generate_audio_stream(text, self.scan_id):
                 if audio_chunk:
                     await self.manager.send_message(self.scan_id, self.user_email, {
@@ -1157,7 +1129,6 @@ class StreamingTranscriber:
                         "timestamp": datetime.now().isoformat()
                     })
             
-            # Send audio completion
             await self.manager.send_message(self.scan_id, self.user_email, {
                 "type": "audio_complete",
                 "text": text,
@@ -1176,6 +1147,7 @@ class ConnectionManager:
         self.active_connections: Dict[str, WebSocket] = {}
         self.user_sessions: Dict[str, Dict] = {}
         self.transcribers: Dict[str, StreamingTranscriber] = {}
+        
 
     async def connect(self, websocket: WebSocket, scan_id: str, user_email: str):
         await websocket.accept()
@@ -1189,7 +1161,6 @@ class ConnectionManager:
             "is_streaming": False
         }
         
-        # Create transcriber for this connection
         self.transcribers[connection_id] = StreamingTranscriber(scan_id, user_email, self)
         
         logger.info(f"WebSocket connected: {connection_id}")
@@ -1201,6 +1172,9 @@ class ConnectionManager:
         if connection_id in self.user_sessions:
             del self.user_sessions[connection_id]
         if connection_id in self.transcribers:
+            # Stop any ongoing transcription
+            transcriber = self.transcribers[connection_id]
+            transcriber.is_recording = False
             del self.transcribers[connection_id]
         logger.info(f"WebSocket disconnected: {connection_id}")
 
@@ -1209,7 +1183,12 @@ class ConnectionManager:
         if connection_id in self.active_connections:
             websocket = self.active_connections[connection_id]
             try:
-                await websocket.send_text(json.dumps(message))
+                # Check if websocket is still connected before sending
+                if websocket.client_state.name == "CONNECTED":
+                    await websocket.send_text(json.dumps(message))
+                else:
+                    print(f"[DEBUG] WebSocket {connection_id} is not connected, removing from active connections")
+                    self.disconnect(scan_id, user_email)
             except Exception as e:
                 logger.error(f"Error sending message to {connection_id}: {e}")
                 self.disconnect(scan_id, user_email)
@@ -1239,13 +1218,14 @@ class ConnectionManager:
 manager = ConnectionManager()
 
 async def get_websocket_user(token: str) -> Optional[Dict]:
-    """Authenticate WebSocket connection using token"""
     try:
-        
+        print(f"[DEBUG] Decoding token: {token}")
         if not token:
+            print("[ERROR] No token provided")
             return None
         
         payload = verify_token(token)
+        print(f"[DEBUG] Decoded payload: {payload}")
         
         if not payload:
             return None
@@ -1259,173 +1239,239 @@ async def get_websocket_user(token: str) -> Optional[Dict]:
         if not user:
             return None
         
-        # Check MFA requirements
         mfa_required = payload.get("mfa_required", False)
         mfa_verified = payload.get("mfa_verified", False)
         
         if mfa_required and not mfa_verified:
+            print("[ERROR] MFA required but not verified")
             return None
         return user
     
     except Exception as e:
+        logger.error(f"WebSocket auth error: {e}")
         return None
 
 @app.websocket("/ws/chat/{scan_id}")
-async def websocket_chat_endpoint(
-    websocket: WebSocket,
-    scan_id: str,
-    token: str = Query(...)
-):
-    """WebSocket endpoint for real-time chat with streaming voice support"""
+async def websocket_chat_endpoint(websocket: WebSocket, scan_id: str, token: str = Query(...)):
+    print(f"[DEBUG] Incoming WebSocket connection for scan_id: {scan_id}")
+    print(f"[DEBUG] Token received: {token}")
     
-    # Authenticate user
-    current_user = await get_websocket_user(token)
-    
-    if not current_user:
-        await websocket.close(code=1008, reason="Authentication failed")
-        return
-    
-    user_email = current_user["email"]
-    
-    db = DatabaseManager()
-    
-    # Verify scan access
-    scan = db.get_scan(scan_id)
-    
-    if not scan:
-        await websocket.close(code=1008, reason="Scan not found")
-        return
-    
-    user_profile = db.get_user(scan["user_id"])
-    
-    if not user_profile:
-        await websocket.close(code=1008, reason="User profile not found")
-        return
-    
-    if user_profile["email"] != user_email:
-        await websocket.close(code=1008, reason="Access denied")
-        return
-    
-    # Connect to WebSocket
-    await manager.connect(websocket, scan_id, user_email)
-    
-    # Send initial connection confirmation
-    await manager.send_message(scan_id, user_email, {
-        "type": "connection_established",
-        "message": "Connected to real-time streaming chat",
-        "scan_id": scan_id,
-        "capabilities": ["text", "audio_streaming", "real_time_transcription"],
-        "timestamp": datetime.now().isoformat()
-    })
-    
-    print("DEBUG: WebSocket connection established successfully")
+    user_email = None
+    connection_id = None
     
     try:
+        # Accept the WebSocket connection first
+        await websocket.accept()
+        print("[DEBUG] WebSocket connection accepted")
+        
+        # Then perform authentication
+        current_user = await get_websocket_user(token)
+        print(f"[DEBUG] Authenticated user from token: {current_user}")
+        
+        if not current_user:
+            print("[ERROR] Authentication failed.")
+            await websocket.close(code=1008, reason="Authentication failed")
+            return
+        
+        user_email = current_user["email"]
+        connection_id = f"{user_email}_{scan_id}"
+        
+        # Initialize DatabaseManager
+        db = DatabaseManager()
+        
+        # Get scan information
+        scan = db.get_scan(scan_id)
+        if not scan:
+            print(f"[ERROR] Scan not found: {scan_id}")
+            await websocket.close(code=1008, reason="Scan not found")
+            return
+        
+        # Get user profile
+        user_profile = db.get_user(scan["user_id"])
+        if not user_profile:
+            print(f"[ERROR] User profile not found for user_id: {scan['user_id']}")
+            await websocket.close(code=1008, reason="User profile not found")
+            return
+        
+        print(f"[DEBUG] User profile found: {user_profile}")
+        print(f"[DEBUG] Comparing emails - Profile: {user_profile['email']}, Token: {user_email}")
+        
+        # Check if the authenticated user owns this scan
+        if user_profile["email"] != user_email:
+            print(f"[ERROR] Access denied - Email mismatch: {user_profile['email']} vs {user_email}")
+            await websocket.close(code=1008, reason="Access denied")
+            return
+        
+        print("[DEBUG] Access granted - setting up connection manager")
+        
+        # Set up the connection in the manager
+        manager.active_connections[connection_id] = websocket
+        manager.user_sessions[connection_id] = {
+            "scan_id": scan_id,
+            "user_email": user_email,
+            "connected_at": datetime.now(),
+            "is_processing": False,
+            "is_streaming": False
+        }
+        
+        manager.transcribers[connection_id] = StreamingTranscriber(scan_id, user_email, manager)
+        
+        logger.info(f"WebSocket connected: {connection_id}")
+        
+        # Send connection established message
+        await manager.send_message(scan_id, user_email, {
+            "type": "connection_established",
+            "message": "Connected to real-time streaming chat",
+            "scan_id": scan_id,
+            "capabilities": ["text", "audio_streaming", "real_time_transcription"],
+            "timestamp": datetime.now().isoformat()
+        })
+        
+        print(f"[DEBUG] WebSocket connection established for {user_email}_{scan_id}")
+        
+        # Main message loop with proper disconnect handling
         while True:
-            # Receive message from client
-            data = await websocket.receive_text()
-            message_data = json.loads(data)
-            
-            message_type = message_data.get("type")
-            
-            if message_type == "start_streaming":
-                # Start audio streaming session
-                manager.set_streaming(scan_id, user_email, True)
-                await manager.send_message(scan_id, user_email, {
-                    "type": "streaming_started",
-                    "message": "Ready to receive audio stream",
-                    "timestamp": datetime.now().isoformat()
-                })
+            try:
+                # Check if connection is still active before trying to receive
+                if connection_id not in manager.active_connections:
+                    print(f"[DEBUG] Connection {connection_id} no longer active, breaking loop")
+                    break
                 
-            elif message_type == "audio_chunk":
-                # Handle streaming audio chunk
-                if not manager.is_streaming(scan_id, user_email):
-                    continue
+                # Check WebSocket state before trying to receive
+                if websocket.client_state.name == "DISCONNECTED":
+                    print(f"[DEBUG] WebSocket is disconnected, breaking loop")
+                    break
                 
-                audio_base64 = message_data.get("audio_data")
-                if audio_base64:
-                    try:
-                        audio_bytes = base64.b64decode(audio_base64)
-                        transcriber = manager.get_transcriber(scan_id, user_email)
-                        if transcriber:
-                            transcriber.add_audio_chunk(audio_bytes)
-                    except Exception as e:
-                        logger.error(f"Error processing audio chunk: {e}")
-                        
-            elif message_type == "stop_streaming":
-                manager.set_streaming(scan_id, user_email, False)
-
-                # Finalize any buffered audio
-                transcriber = manager.get_transcriber(scan_id, user_email)
-                if transcriber and transcriber.audio_buffer.tell() > 0:
-                    audio_data = transcriber.audio_buffer.getvalue()
-                    asyncio.create_task(transcriber._transcribe_and_respond(audio_data))
-                    transcriber.audio_buffer = io.BytesIO()
-                    transcriber.is_recording = False
-
-                await manager.send_message(scan_id, user_email, {
-                    "type": "streaming_stopped",
-                    "message": "Audio streaming stopped",
-                    "timestamp": datetime.now().isoformat()
-                })
-
-                
-            elif message_type == "text":
-                # Handle regular text message (fallback)
-                if manager.is_processing(scan_id, user_email):
-                    await manager.send_message(scan_id, user_email, {
-                        "type": "error",
-                        "message": "Already processing a request. Please wait."
-                    })
-                    continue
-                
-                manager.set_processing(scan_id, user_email, True)
+                # Use receive_text() and catch WebSocketDisconnect specifically
                 try:
-                    await process_chat_message(scan_id, user_email, message_data, db)
-                finally:
-                    manager.set_processing(scan_id, user_email, False)
+                    data = await websocket.receive_text()
+                except WebSocketDisconnect:
+                    print(f"[DEBUG] WebSocket disconnected normally")
+                    break
+                except Exception as e:
+                    print(f"[ERROR] Error receiving message: {e}")
+                    break
+                
+                # Process the message
+                try:
+                    message_data = json.loads(data)
+                    message_type = message_data.get("type")
+                    print(f"[DEBUG] Received message type: {message_type}")
                     
-            elif message_type == "audio":
-                # Handle complete audio message (legacy support)
-                if manager.is_processing(scan_id, user_email):
+                    if message_type == "start_streaming":
+                        manager.set_streaming(scan_id, user_email, True)
+                        await manager.send_message(scan_id, user_email, {
+                            "type": "streaming_started",
+                            "message": "Ready to receive audio stream",
+                            "timestamp": datetime.now().isoformat()
+                        })
+                        
+                    elif message_type == "audio_chunk":
+                        if not manager.is_streaming(scan_id, user_email):
+                            continue
+                        
+                        audio_base64 = message_data.get("audio_data")
+                        if audio_base64:
+                            try:
+                                audio_bytes = base64.b64decode(audio_base64)
+                                transcriber = manager.get_transcriber(scan_id, user_email)
+                                if transcriber:
+                                    transcriber.add_audio_chunk(audio_bytes)
+                            except Exception as e:
+                                logger.error(f"Error processing audio chunk: {e}")
+                                
+                    elif message_type == "stop_streaming":
+                        manager.set_streaming(scan_id, user_email, False)
+                        transcriber = manager.get_transcriber(scan_id, user_email)
+                        if transcriber and transcriber.audio_buffer.tell() > 0:
+                            audio_data = transcriber.audio_buffer.getvalue()
+                            asyncio.create_task(transcriber._transcribe_and_respond(audio_data))
+                            transcriber.audio_buffer = io.BytesIO()
+                            transcriber.is_recording = False
+
+                        await manager.send_message(scan_id, user_email, {
+                            "type": "streaming_stopped",
+                            "message": "Audio streaming stopped",
+                            "timestamp": datetime.now().isoformat()
+                        })
+                        
+                    elif message_type == "text":
+                        if manager.is_processing(scan_id, user_email):
+                            await manager.send_message(scan_id, user_email, {
+                                "type": "error",
+                                "message": "Already processing a request. Please wait."
+                            })
+                            continue
+                        
+                        manager.set_processing(scan_id, user_email, True)
+                        try:
+                            await process_chat_message(scan_id, user_email, message_data, db)
+                        finally:
+                            manager.set_processing(scan_id, user_email, False)
+                            
+                    elif message_type == "audio":
+                        if manager.is_processing(scan_id, user_email):
+                            await manager.send_message(scan_id, user_email, {
+                                "type": "error",
+                                "message": "Already processing a request. Please wait."
+                            })
+                            continue
+                        
+                        manager.set_processing(scan_id, user_email, True)
+                        try:
+                            await process_chat_message(scan_id, user_email, message_data, db)
+                        finally:
+                            manager.set_processing(scan_id, user_email, False)
+                    
+                    else:
+                        await manager.send_message(scan_id, user_email, {
+                            "type": "error",
+                            "message": f"Unknown message type: {message_type}"
+                        })
+                        
+                except json.JSONDecodeError as e:
+                    print(f"[ERROR] JSON decode error: {e}")
                     await manager.send_message(scan_id, user_email, {
                         "type": "error",
-                        "message": "Already processing a request. Please wait."
+                        "message": "Invalid JSON format"
                     })
-                    continue
-                
-                manager.set_processing(scan_id, user_email, True)
-                try:
-                    await process_chat_message(scan_id, user_email, message_data, db)
-                finally:
-                    manager.set_processing(scan_id, user_email, False)
-            
-            else:
-                await manager.send_message(scan_id, user_email, {
-                    "type": "error",
-                    "message": f"Unknown message type: {message_type}"
-                })
+                except Exception as e:
+                    print(f"[ERROR] Error processing message: {e}")
+                    print(f"[ERROR] Traceback: {traceback.format_exc()}")
+                    await manager.send_message(scan_id, user_email, {
+                        "type": "error",
+                        "message": f"Error processing message: {str(e)}"
+                    })
+                    
+            except Exception as e:
+                print(f"[ERROR] Unexpected error in message loop: {e}")
+                print(f"[ERROR] Traceback: {traceback.format_exc()}")
+                break
                 
     except WebSocketDisconnect:
-        print("DEBUG: WebSocket disconnected")
-        manager.disconnect(scan_id, user_email)
+        print(f"[DEBUG] WebSocket disconnected for {connection_id}")
     except Exception as e:
-        print(f"DEBUG: WebSocket error: {e}")
-        logger.error(f"WebSocket error for {user_email}_{scan_id}: {e}")
-        await manager.send_message(scan_id, user_email, {
-            "type": "error",
-            "message": f"An error occurred: {str(e)}"
-        })
-        manager.disconnect(scan_id, user_email)
+        print(f"[ERROR] WebSocket error: {e}")
+        print(f"[ERROR] Traceback: {traceback.format_exc()}")
+    finally:
+        # Clean up resources
+        if user_email and connection_id:
+            manager.disconnect(scan_id, user_email)
+            print(f"[DEBUG] Cleaned up connection for {connection_id}")
+        
+        # Don't try to close the websocket if it's already disconnected
+        try:
+            if websocket.client_state.name != "DISCONNECTED":
+                await websocket.close()
+                print(f"[DEBUG] Closed websocket connection")
+        except Exception as e:
+            print(f"[DEBUG] Error closing websocket (likely already closed): {e}")
 
-async def process_chat_message(scan_id: str, user_email: str, message_data: dict, db: DatabaseManager):
-    """Process incoming chat message (text or audio) - legacy support"""
-    
+async def process_chat_message(scan_id: str, user_email: str, message_data: dict, db):
     try:
         message_type = message_data.get("type")
         user_message = None
         
-        # Send processing status
         await manager.send_message(scan_id, user_email, {
             "type": "processing",
             "message": "Processing your message..."
@@ -1441,7 +1487,6 @@ async def process_chat_message(scan_id: str, user_email: str, message_data: dict
                 return
                 
         elif message_type == "audio":
-            # Handle base64 audio data
             audio_base64 = message_data.get("audio_data")
             if not audio_base64:
                 await manager.send_message(scan_id, user_email, {
@@ -1451,16 +1496,13 @@ async def process_chat_message(scan_id: str, user_email: str, message_data: dict
                 return
             
             try:
-                # Decode base64 audio
                 audio_bytes = base64.b64decode(audio_base64)
                 
-                # Send transcription status
                 await manager.send_message(scan_id, user_email, {
                     "type": "transcribing",
                     "message": "Converting speech to text..."
                 })
                 
-                # Convert speech to text
                 user_message = speech_to_text_stream(audio_bytes)
                 
                 if not user_message:
@@ -1470,7 +1512,6 @@ async def process_chat_message(scan_id: str, user_email: str, message_data: dict
                     })
                     return
                 
-                # Send transcription result
                 await manager.send_message(scan_id, user_email, {
                     "type": "transcription",
                     "message": user_message
@@ -1489,19 +1530,15 @@ async def process_chat_message(scan_id: str, user_email: str, message_data: dict
             })
             return
         
-        # Store user message in chat history
         db.add_chat_message(scan_id, "user", user_message)
         
-        # Send generating response status
         await manager.send_message(scan_id, user_email, {
             "type": "generating",
             "message": "Generating response..."
         })
         
-        # Get chat history and generate response
         chat_history = db.get_chat_history(scan_id)
         
-        # Filter history and create chat-focused system message
         filtered_history = []
         original_analysis = None
         
@@ -1517,7 +1554,6 @@ async def process_chat_message(scan_id: str, user_email: str, message_data: dict
                     "content": msg["message"]
                 })
         
-        # Create system message for chat mode
         chat_system_message = {
             "role": "system",
             "content": (
@@ -1534,10 +1570,8 @@ async def process_chat_message(scan_id: str, user_email: str, message_data: dict
             )
         }
         
-        # Build GPT messages
         gpt_messages = [chat_system_message]
         
-        # Add context about original analysis
         if original_analysis:
             try:
                 parsed_analysis = json.loads(original_analysis.strip())
@@ -1552,10 +1586,8 @@ async def process_chat_message(scan_id: str, user_email: str, message_data: dict
                     "content": "I previously analyzed your outfit and provided feedback."
                 })
         
-        # Add filtered chat history
         gpt_messages.extend(filtered_history)
         
-        # Generate response
         reply = chat_with_gpt(gpt_messages, max_tokens=150)
         
         if not reply:
@@ -1565,17 +1597,14 @@ async def process_chat_message(scan_id: str, user_email: str, message_data: dict
             })
             return
         
-        # Store assistant's reply
         db.add_chat_message(scan_id, "assistant", reply)
         
-        # Send text response immediately
         await manager.send_message(scan_id, user_email, {
             "type": "response",
             "message": reply,
             "timestamp": datetime.now().isoformat()
         })
         
-        # Generate audio response asynchronously
         asyncio.create_task(generate_and_send_audio(scan_id, user_email, reply))
         
     except Exception as e:
@@ -1586,19 +1615,15 @@ async def process_chat_message(scan_id: str, user_email: str, message_data: dict
         })
 
 async def generate_and_send_audio(scan_id: str, user_email: str, text: str):
-    """Generate audio response and send it via WebSocket"""
     try:
-        # Send audio generation status
         await manager.send_message(scan_id, user_email, {
             "type": "generating_audio",
             "message": "Generating audio response..."
         })
         
-        # Generate audio (this might take a few seconds)
         audio_data = generate_response_audio_base64(text, scan_id, "realtime_chat")
         
         if audio_data:
-            # Send audio response
             await manager.send_message(scan_id, user_email, {
                 "type": "audio_response",
                 "audio_base64": audio_data["audio_base64"],
@@ -1652,6 +1677,17 @@ async def force_disconnect_chat(scan_id: str, current_user: dict = Depends(get_a
         return {"message": "Connection closed"}
     else:
         return {"message": "No active connection found"}
+
+
+
+
+
+
+
+
+
+
+
 
 # Previous chat endpoint
 
@@ -2123,314 +2159,598 @@ def extract_frames_to_base64(video_path: str, exclude_start: int = 4, exclude_en
     return image_messages, frame_paths
 
 
-@app.post("/analyze-outfit/")
-async def analyze_outfit(
-    video: UploadFile = File(None),
-    photo: UploadFile = File(None),
-    current_user: dict = Depends(get_authenticated_user)
-):
-    try:
-        # Validate input - require either video or photo, but not both
-        if not video and not photo:
-            return JSONResponse(
-                status_code=400, 
-                content={"error": "Either video or photo file is required"}
-            )
-        
-        if video and photo:
-            return JSONResponse(
-                status_code=400, 
-                content={"error": "Please provide either video or photo, not both"}
-            )
+import asyncio
+import json
+import uuid
+import os
+import shutil
+import re
+import base64
+import traceback
+from typing import Dict, Any, Optional
+from fastapi import WebSocket, WebSocketDisconnect, HTTPException, Query
+from fastapi.responses import JSONResponse
+import logging
 
-        # Get or create user profile for outfit analysis
-        user_email = current_user["email"]
-        
-        # Use the helper function to get or create user profile
-        user_id = get_or_create_user_profile(db, user_email)
-        
-        if not user_id:
-            return JSONResponse(
-                status_code=500, 
-                content={"error": "Failed to create or find user profile"}
-            )
+# Import your existing modules
+from utils.voiceagent import generate_audio_stream, OpenAITTSStreamer
+from utils.key_func import verify_token, get_current_user_email  # Add this import
+from database import DatabaseManager  # Add this import
+# Import your database and utility functions
+# from your_db_module import get_or_create_user_profile, create_scan, add_chat_message
+# from your_utils import extract_frames, load_image_messages, chat_with_gpt
 
-        # Generate unique scan ID
-        scan_id = str(uuid.uuid4())
-        
-        # Create scan-specific frame directory
-        scan_frame_dir = os.path.join(FRAME_DIR, scan_id)
-        os.makedirs(scan_frame_dir, exist_ok=True)
+logger = logging.getLogger(__name__)
 
-        # Handle video input
-        if video:
-            # Save video to disk
-            video_filename = f"{scan_id}_{video.filename}"
-            video_path = os.path.join(UPLOAD_DIR, video_filename)
-            with open(video_path, "wb") as buffer:
-                shutil.copyfileobj(video.file, buffer)
-
-            # Extract frames excluding 4-7 second range (6 frames total)
-            # This will create a subdirectory with the extracted frames
-            actual_frames_dir = extract_frames(video_path, scan_frame_dir, exclude_start=4, exclude_end=7)
+class WebSocketAnalyzeOutfit:
+    def __init__(self, db, upload_dir: str, frame_dir: str):
+        self.db = db
+        self.upload_dir = upload_dir
+        self.frame_dir = frame_dir
+        self.tts_streamer = OpenAITTSStreamer()
+    
+    async def authenticate_user(self, token: str) -> Optional[Dict[str, Any]]:
+        """Authenticate user using token from URL"""
+        try:
+            # Use the existing authentication logic from authmiddleware.py
+            payload = verify_token(token)
             
-            # Update scan_frame_dir to point to the actual frames directory
-            scan_frame_dir = actual_frames_dir
+            if not payload:
+                logger.warning(f"Token verification failed for token: {token[:10]}...")
+                return None
             
-            # Store video path for database
-            file_path = video_path
+            email = payload.get("sub")
+            if not email:
+                logger.warning(f"No email found in token payload: {token[:10]}...")
+                return None
             
-            print(f"Video frames extracted to: {scan_frame_dir}")
+            # Check if user exists in database
+            user = self.db.get_auth_user_by_email(email)
+            if not user:
+                logger.warning(f"User not found in database: {email}")
+                return None
+            
+            # Check MFA if required
+            if payload.get("mfa_required") and not payload.get("mfa_verified"):
+                logger.warning(f"MFA verification required for user: {email}")
+                return None
+            
+            return user
+            
+        except Exception as e:
+            logger.error(f"Authentication error: {e}")
+            return None
+    
+    async def handle_analyze_outfit(self, websocket: WebSocket, data: Dict[str, Any], user_data: Dict[str, Any]):
+        """Handle analyze outfit request via WebSocket with streaming audio"""
+        try:
+            # Extract data from WebSocket message
+            scan_id = data.get("scan_id", str(uuid.uuid4()))
+            user_email = user_data.get("email")  # Get email from authenticated user data
+            input_type = data.get("input_type")  # "video" or "photo"
+            file_data = data.get("file_data")  # base64 encoded file data
+            filename = data.get("filename")
+            
+            # Validate input
+            if not user_email:
+                await self._send_error(websocket, "User email not found in authentication data")
+                return
+            
+            if not input_type or input_type not in ["video", "photo"]:
+                await self._send_error(websocket, "Invalid input type. Must be 'video' or 'photo'")
+                return
+            
+            if not file_data or not filename:
+                await self._send_error(websocket, "File data and filename are required")
+                return
+            
+            # Send processing status
+            await self._send_status(websocket, "processing", "Processing your outfit analysis...")
+            
+            # Get or create user profile
+            user_id = get_or_create_user_profile(self.db, user_email)
+            if not user_id:
+                await self._send_error(websocket, "Failed to create or find user profile")
+                return
+            
+            # Decode and save file
+            try:
+                file_bytes = base64.b64decode(file_data)
+            except Exception as e:
+                await self._send_error(websocket, f"Invalid file data: {str(e)}")
+                return
+            
+            # Create scan-specific frame directory
+            scan_frame_dir = os.path.join(self.frame_dir, scan_id)
+            os.makedirs(scan_frame_dir, exist_ok=True)
+            
+            # Handle video or photo processing
+            if input_type == "video":
+                file_path = await self._process_video(file_bytes, filename, scan_id, scan_frame_dir)
+            else:  # photo
+                file_path = await self._process_photo(file_bytes, filename, scan_frame_dir)
+            
+            # Load image messages
+            image_messages = load_image_messages(scan_frame_dir)
+            if not image_messages:
+                await self._send_error(websocket, "No valid images found for analysis")
+                return
+            
+            # Get frame paths for database
+            frame_paths = self._get_frame_paths(scan_frame_dir, input_type)
+            
+            # Send analysis status
+            await self._send_status(websocket, "analyzing", "Analyzing your outfit...")
+            
+            # Perform outfit analysis
+            analysis_result = await self._analyze_outfit_with_gpt(image_messages, input_type)
+            
+            if analysis_result.get("error") == "multiple_people":
+                await self._send_error(websocket, analysis_result.get("message", "Multiple people detected"))
+                return
+            
+            # Extract analysis components
+            score = analysis_result.get("score", "N/A")
+            fit_line = analysis_result.get("fit_line", "")
+            stylist_says = analysis_result.get("stylist_says", "")
+            what_went_wrong = analysis_result.get("what_went_wrong", "")
+            
+            # Extract numeric score
+            individual_scores = self._extract_scores(score, analysis_result.get("raw_reply", ""))
+            
+            # Save scan to database
+            scan_success = self.db.create_scan(
+                scan_id=scan_id,
+                user_id=user_id,
+                video_path=file_path,
+                image_paths=frame_paths,
+                individual_scores=individual_scores,
+                feedback=analysis_result.get("raw_reply", "")
+            )
+            
+            if not scan_success:
+                await self._send_error(websocket, "Failed to save scan data")
+                return
+            
+            # Save chat messages
+            await self._save_chat_messages(scan_id, analysis_result.get("raw_reply", ""), input_type)
+            
+            # Send analysis results
+            await self._send_analysis_results(websocket, {
+                "scan_id": scan_id,
+                "score": score,
+                "fit_line": fit_line,
+                "stylist_says": stylist_says,
+                "what_went_wrong": what_went_wrong,
+                "individual_scores": individual_scores,
+                "total_people": 1,
+                "user_id": user_id,
+                "input_type": input_type
+            })
+            
+            # Create user-friendly audio text
+            audio_text = self._create_audio_friendly_text(analysis_result)
+            
+            # Stream audio response
+            await self._stream_audio_response(websocket, audio_text, scan_id)
+            
+            # Send completion status
+            await self._send_status(websocket, "completed", "Analysis completed successfully")
+            
+        except Exception as e:
+            logger.error(f"Error in analyze_outfit WebSocket handler: {e}")
+            traceback.print_exc()
+            await self._send_error(websocket, f"Internal server error: {str(e)}")
+    
+    def _create_audio_friendly_text(self, analysis_result: Dict[str, Any]) -> str:
+        """Create user-friendly text for audio generation"""
+        try:
+            # Extract the key components
+            score = analysis_result.get("score", "N/A")
+            fit_line = analysis_result.get("fit_line", "")
+            stylist_says = analysis_result.get("stylist_says", "")
+            what_went_wrong = analysis_result.get("what_went_wrong", "")
+            
+            # Clean up the text by removing JSON formatting characters
+            def clean_text(text):
+                if not text:
+                    return ""
+                # Remove common JSON artifacts
+                text = text.replace('\\n', ' ').replace('\\"', '"').replace('\\', '')
+                text = re.sub(r'[{}"\[\],]', '', text)  # Remove JSON characters
+                text = re.sub(r'\s+', ' ', text)  # Normalize whitespace
+                return text.strip()
+            
+            # Clean all components
+            clean_score = clean_text(score)
+            clean_fit_line = clean_text(fit_line)
+            clean_stylist_says = clean_text(stylist_says)
+            clean_what_went_wrong = clean_text(what_went_wrong)
+            
+            # Construct a natural, conversational response
+            audio_parts = []
+            
+            if clean_score and clean_score != "N/A":
+                audio_parts.append(f"Your outfit scored {clean_score}")
+            
+            if clean_fit_line:
+                audio_parts.append(clean_fit_line)
+            
+            if clean_stylist_says:
+                audio_parts.append(clean_stylist_says)
+            
+            if clean_what_went_wrong:
+                audio_parts.append(f"Here's what could be improved: {clean_what_went_wrong}")
+            
+            # Join with natural pauses
+            audio_text = ". ".join(audio_parts) + "."
+            
+            # Final cleanup
+            audio_text = re.sub(r'\.+', '.', audio_text)  # Remove multiple dots
+            audio_text = re.sub(r'\s+', ' ', audio_text)  # Normalize whitespace
+            
+            return audio_text.strip()
+            
+        except Exception as e:
+            logger.error(f"Error creating audio-friendly text: {e}")
+            return "Your outfit analysis is complete! Check the results above."
+    
+    async def _process_video(self, file_bytes: bytes, filename: str, scan_id: str, scan_frame_dir: str) -> str:
+        """Process video file and extract frames"""
+        # Save video to disk
+        video_filename = f"{scan_id}_{filename}"
+        video_path = os.path.join(self.upload_dir, video_filename)
         
-        # Handle photo input
-        else:  # photo is provided
-            # Validate photo file type
-            if not photo.content_type or not photo.content_type.startswith('image/'):
-                return JSONResponse(
-                    status_code=400, 
-                    content={"error": "Invalid photo format. Please upload a valid image file."}
+        with open(video_path, "wb") as f:
+            f.write(file_bytes)
+        
+        # Extract frames excluding 4-7 second range
+        actual_frames_dir = extract_frames(video_path, scan_frame_dir, exclude_start=4, exclude_end=7)
+        
+        # Update scan_frame_dir to point to actual frames directory
+        if actual_frames_dir != scan_frame_dir:
+            # Move frames to expected directory
+            for frame_file in os.listdir(actual_frames_dir):
+                shutil.move(
+                    os.path.join(actual_frames_dir, frame_file),
+                    os.path.join(scan_frame_dir, frame_file)
                 )
-            
-            # Save photo directly to frame directory
-            photo_filename = f"frame_001.jpg"  # Standardize naming
-            photo_path = os.path.join(scan_frame_dir, photo_filename)
-            
-            with open(photo_path, "wb") as buffer:
-                shutil.copyfileobj(photo.file, buffer)
-            
-            # Store photo path for database (use the photo path as file_path)
-            file_path = photo_path
-
-        # Load image messages - now will have exactly 6 frames for 10-sec video
-        image_messages = load_image_messages(scan_frame_dir)
-        if not image_messages:
-            return JSONResponse(
-                status_code=400, 
-                content={"error": "No valid images found for analysis."}
-            )
-
-        # Get frame paths for database storage
+        
+        return video_path
+    
+    async def _process_photo(self, file_bytes: bytes, filename: str, scan_frame_dir: str) -> str:
+        """Process photo file"""
+        # Save photo directly to frame directory
+        photo_filename = "frame_001.jpg"  # Standardize naming
+        photo_path = os.path.join(scan_frame_dir, photo_filename)
+        
+        with open(photo_path, "wb") as f:
+            f.write(file_bytes)
+        
+        return photo_path
+    
+    def _get_frame_paths(self, scan_frame_dir: str, input_type: str) -> list:
+        """Get frame paths for database storage"""
         frame_paths = []
         image_extensions = (".jpg", ".jpeg", ".png")
-        # For videos, we now have exactly 6 frames; for photos, still 1
-        max_frames = 6 if video else 1
+        max_frames = 6 if input_type == "video" else 1
+        
         for filename in sorted(os.listdir(scan_frame_dir))[:max_frames]:
             if filename.lower().endswith(image_extensions):
                 frame_paths.append(os.path.join(scan_frame_dir, filename))
-
-        # Updated system message to handle single person only
+        
+        return frame_paths
+    
+    async def _analyze_outfit_with_gpt(self, image_messages: list, input_type: str) -> Dict[str, Any]:
+        """Analyze outfit using GPT with the provided system message"""
         system_message = {
-    "role": "system",
-    "content": (
-        "You are NuFit — a fun, stylish fashion AI assistant who always responds in English, even if the user speaks another language."
-        "Speak like a cool cousin — fun, honest, brutally real, and baby-simple.\n\n"
-        "INITIAL OUTFIT ANALYSIS MODE:\n"
-        "When analyzing outfit images, first determine how many people are present. Focus on the primary subject, typically the person in the foreground or center of the image. A 'person' is defined as a human figure with clear facial features or a distinct body outline. Ignore reflections, shadows, mannequins, posters, or background figures that are not the primary subject.\n\n"
+            "role": "system",
+            "content": (
+                "You are NuFit — the coolest, most stylish, and brutally honest fashion bestie ever. You ALWAYS respond in English, even if the user types in another language.\n\n"
 
-        "IF MORE THAN ONE PERSON IS DETECTED:\n"
-        "If multiple distinct human figures with clear facial features or body outlines are present in the foreground, return this exact JSON response:\n"
-        "{\n"
-        "  \"error\": \"multiple_people\",\n"
-        "  \"message\": \"More than one person detected. Cannot scan the outfit. Please ensure only one person is visible in the video/photo.\"\n"
-        "}\n\n"
+                "You talk like you're texting your best friend:\n"
+                "• Baby-simple words only\n"
+                "• No smart-sounding or teacher-y talk\n"
+                "• Use real human slang and texting tone like: 'Ouuu okay!', 'Say less!', 'You wild for this one!', etc.\n"
+                "• One sentence at a time. Short. Fun. Human.\n"
+                "• Always wait for the user to reply between thoughts\n"
+                "• Never give all your thoughts at once\n"
+                "• Never sound like a robot, a judge, or a fashion critic\n"
+                "• You mix confidence, love, and jokes with honest feedback\n\n"
 
-        "IF ONLY ONE PERSON IS DETECTED OR REASONABLY ASSUMED:\n"
-        "If only one primary subject is clearly present (e.g., a single person in a selfie or video), proceed with outfit analysis. If there’s ambiguity (e.g., reflections or background figures), prioritize the foreground/central figure and assume it’s a single person unless multiple clear human figures are confirmed. Return a JSON object with the outfit analysis:\n"
-        "{\n"
-        "  \"score\": \"65/100\",\n"
-        "  \"fit_line\": \"Bro, this look is giving... laundry day vibes.\",\n"
-        "  \"stylist_says\": \"Way too casual for a stylish day out. That oversized tee and those shoes just don't click.\",\n"
-        "  \"what_went_wrong\": \"Poor coordination, and the fit looks like it was picked in the dark. Better color harmony and a strong piece (like a jacket or shoes) would help.\"\n"
-        "}\n\n"
+                "Who You Are:\n"
+                "You're NuFit — an AI with 40 years of fashion wisdom.\n"
+                "You've styled celebrities, athletes, rappers, influencers — and everyday people too.\n"
+                "You know that fashion isn’t about rules — it's about *feeling yourself*.\n"
+                "You're here to hype the user up, keep it real, and make them feel dope in their own skin.\n\n"
 
-        "Scoring Rules:\n"
-        "• Matching tones: +10\n"
-        "• Contradicting styles: -10\n"
-        "• >3 bold colors: -5\n"
-        "• No shoes: -15\n"
-        "• Slides/formals mismatch: -20\n"
-        "• Matching top & bottom: +15\n"
-        "• Shoes match outfit: +10\n"
-        "• Fits the event: +10\n"
-        "• Clashing colors (e.g., red+orange): -10\n\n"
+                "INITIAL OUTFIT ANALYSIS MODE:\n"
+                "When an outfit scan comes in, act like it just happened LIVE. Always start with a fun greeting like:\n"
+                "• 'Ouuu okay! I just caught your upload — I see you just scanned your outfit. Let’s get into this one together.'\n"
+                "• 'Heyyy! Fresh drop alert — I see you just scanned your fit. I’m ready to check it out with you. Let’s see what’s cooking.'\n"
+                "• 'Ouuu you just uploaded this? I’m on it! Let’s break it down together.'\n"
+                "• 'Okay okay, new scan just came through! I’m hyped to help you style this one up.'\n"
+                "• 'Ohhh you just scanned a new fit? Say less — I’m right here with you. Let’s dive in.'\n"
+                "Rotate your greetings. Never repeat the same one twice in a row.\n\n"
 
-        "Adjust with fashion sense if rules are broken but the outfit still slays or follows rules but looks boring.\n\n"
+                "HOW TO ANALYZE:\n"
+                "First, figure out how many people are in the image. Focus on the primary subject — usually the one in the foreground or center. A 'person' means someone with a clear face or body shape. Ignore reflections, shadows, posters, mannequins, or people in the background.\n\n"
 
-        "Tone Guide for 'fit_line' and feedback:\n"
-        "• Score ≥ 85: Be super positive and stylishly hype the outfit.\n"
-        "• 70–84: Be balanced — compliment the strengths but point out improvements.\n"
-        "• 50–69: Be honest — roast a bit, but keep it fun and constructive.\n"
-        "• < 50: Be brutal but funny — roast hard in 'fit_line', be real in 'stylist_says', and give serious advice in 'what_went_wrong'.\n"
-        "  Still be the cool cousin — no insults, just real talk.\n\n"
+                "IF MULTIPLE PEOPLE ARE IN THE FOREGROUND:\n"
+                "If more than one real person is clearly in front, return exactly this:\n"
+                "{\n"
+                "  \"error\": \"multiple_people\",\n"
+                "  \"message\": \"More than one person detected. Cannot scan the outfit. Please ensure only one person is visible in the video/photo.\"\n"
+                "}\n\n"
 
-        "CHAT MODE:\n"
-        "After the initial analysis, respond naturally in conversation. Keep your cool cousin personality:\n"
-        "• Give styling tips and advice\n"
-        "• Answer questions about fashion, colors, trends\n"
-        "• Suggest outfit improvements or alternatives\n"
-        "• Be encouraging but honest\n"
-        "• Use casual, friendly language\n"
-        "• Reference their previous outfit analysis when relevant\n"
-        "If user asks anything unrelated to fashion or styling tips, tell user to stick to the topic\n\n"
+                "IF ONE PERSON IS CLEARLY PRESENT:\n"
+                "If it’s a solo selfie or there's one obvious person in front, go ahead with the analysis. If you're not sure (like someone in the background), assume it’s the person in the front unless there are clearly two.\n"
+                "Return only the JSON in this format:\n"
+                "{\n"
+                "  \"score\": \"65/100\",\n"
+                "  \"fit_line\": \"Bro, this look is giving... laundry day vibes.\",\n"
+                "  \"stylist_says\": \"Way too casual for a stylish day out. That oversized tee and those shoes just don't click.\",\n"
+                "  \"what_went_wrong\": \"Poor coordination, and the fit looks like it was picked in the dark. Better color harmony and a strong piece (like a jacket or shoes) would help.\"\n"
+                "}\n\n"
 
-        "IMPORTANT: For initial outfit analysis, return ONLY the JSON object (no markdown, no code blocks). For follow-up chat, respond naturally as NuFit."
-    )
-}
+                "SCORING RULES:\n"
+                "• Matching tones: +10\n"
+                "• Contradicting styles: -10\n"
+                "• >3 bold colors: -5\n"
+                "• No shoes: -15\n"
+                "• Slides/formals mismatch: -20\n"
+                "• Matching top & bottom: +15\n"
+                "• Shoes match outfit: +10\n"
+                "• Fits the event: +10\n"
+                "• Clashing colors (e.g., red+orange): -10\n"
+                "But if a fit breaks rules and still eats? Give it the credit. And if it follows rules but looks boring? Keep it real.\n\n"
 
-        # Determine input type for user message
-        input_type = "video" if video else "photo"
+                "SCORE TONE GUIDE:\n"
+                "• 85 or higher: Go full hype mode. This outfit is 🔥\n"
+                "• 70–84: Be real — call out what’s cool and what could glow up\n"
+                "• 50–69: Lightly drag them (with love). Keep it fun + helpful.\n"
+                "• Below 50: Be funny-brutal — real talk only, but no mean stuff. Be the bestie who says what they need to hear.\n\n"
+
+                "IMPORTANT:\n"
+                "For initial analysis, return ONLY the JSON. No markdown. No extra text. Just the JSON like you're texting it to your friend straight up.\n"
+            )
+        }
+
         
         user_text_message = {
             "role": "user",
             "content": f"Please analyze the following outfit {input_type} using NuFit style rules and give me my FitScore and tips!"
         }
-
+        
         user_image_message = {
-        "role": "user",
-        "content": [
-            {
-                "type": "text",
-                "text": (
-                    "Analyze the outfit in the provided images. First, confirm that only one person is present by focusing on the primary subject (typically in the foreground or center of the image, e.g., the person taking a selfie). A 'person' is a human figure with clear facial features or a distinct body outline. Ignore reflections, shadows, mannequins, posters, or background figures. If more than one distinct human figure is clearly present in the foreground, return the multiple_people error JSON. If only one person is detected or reasonably assumed, analyze their outfit using NuFit JSON format: score, fit_line, stylist_says, what_went_wrong. Keep it short, voice-friendly, and return only valid JSON, no markdown formatting."
-                )
-            }
-        ] + image_messages
-    }
-
-        # Compose message list and get response
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": (
+                        "Analyze the outfit in the provided images. First, confirm that only one person is present by focusing on the primary subject (typically in the foreground or center of the image, e.g., the person taking a selfie). A 'person' is a human figure with clear facial features or a distinct body outline. Ignore reflections, shadows, mannequins, posters, or background figures. If more than one distinct human figure is clearly present in the foreground, return the multiple_people error JSON. If only one person is detected or reasonably assumed, analyze their outfit using NuFit JSON format: score, fit_line, stylist_says, what_went_wrong. Keep it short, voice-friendly, and return only valid JSON, no markdown formatting."
+                    )
+                }
+            ] + image_messages
+        }
+        
+        # Compose messages and get response
         messages = [system_message, user_text_message, user_image_message]
         reply = chat_with_gpt(messages)
-
+        
         if not reply:
-            return JSONResponse(status_code=500, content={"error": "Failed to get outfit analysis"})
-
-        # Parse JSON response from GPT
-        import re
-
+            return {"error": "Failed to get outfit analysis"}
+        
+        # IMPROVED JSON PARSING
         try:
-            # Clean the response by removing markdown code blocks if present
+            # Clean the response more thoroughly
             cleaned_reply = reply.strip()
+            
+            # Remove markdown code blocks
             if cleaned_reply.startswith('```json'):
-                cleaned_reply = cleaned_reply[7:]  # Remove ```json
+                cleaned_reply = cleaned_reply[7:]
+            if cleaned_reply.startswith('```'):
+                cleaned_reply = cleaned_reply[3:]
             if cleaned_reply.endswith('```'):
-                cleaned_reply = cleaned_reply[:-3]  # Remove ```
+                cleaned_reply = cleaned_reply[:-3]
+            
+            # Remove any leading/trailing text that isn't JSON
+            # Look for the first { and last }
+            first_brace = cleaned_reply.find('{')
+            last_brace = cleaned_reply.rfind('}')
+            
+            if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+                cleaned_reply = cleaned_reply[first_brace:last_brace + 1]
+            
             cleaned_reply = cleaned_reply.strip()
             
             # Parse JSON
             parsed_response = json.loads(cleaned_reply)
+            parsed_response["raw_reply"] = reply
             
-            # Check if multiple people were detected
-            if parsed_response.get("error") == "multiple_people":
-                return JSONResponse(
-                    status_code=400, 
-                    content={
-                        "error": "multiple_people_detected",
-                        "message": parsed_response.get("message", "More than one person detected. Cannot scan the outfit.")
-                    }
-                )
-            
-            # Extract individual components for single person
-            score = parsed_response.get("score", "N/A")
-            fit_line = parsed_response.get("fit_line", "")
-            stylist_says = parsed_response.get("stylist_says", "")
-            what_went_wrong = parsed_response.get("what_went_wrong", "")
-            
-            # Extract numeric score (should be single score now)
-            score_matches = re.findall(r'(\d+)/100', score)
-            if score_matches:
-                individual_scores = [int(score_matches[0])]  # Only one score for single person
-            else:
-                individual_scores = []
+            return parsed_response
             
         except (json.JSONDecodeError, KeyError) as e:
-            print(f"JSON parsing error: {e}")
-            print(f"Raw reply: {reply}")
+            logger.error(f"JSON parsing error: {e}")
+            logger.error(f"Raw reply: {reply}")
             
-            # Check if raw reply contains multiple people error
+            # Check for multiple people error in raw reply
             if "multiple_people" in reply.lower() or "more than one person" in reply.lower():
-                return JSONResponse(
-                    status_code=400, 
-                    content={
-                        "error": "multiple_people_detected",
-                        "message": "More than one person detected. Cannot scan the outfit."
-                    }
-                )
+                return {
+                    "error": "multiple_people",
+                    "message": "More than one person detected. Cannot scan the outfit."
+                }
             
-            # Fallback: extract scores from raw reply
-            score_matches = re.findall(r'(\d+)/100', reply)
-            if score_matches:
-                individual_scores = [int(score_matches[0])]  # Only take first score
-            else:
-                individual_scores = []
+            # Enhanced fallback parsing using regex
+            score_match = re.search(r'"score":\s*"([^"]+)"', reply)
+            fit_line_match = re.search(r'"fit_line":\s*"([^"]+)"', reply)
+            stylist_says_match = re.search(r'"stylist_says":\s*"([^"]+)"', reply)
+            what_went_wrong_match = re.search(r'"what_went_wrong":\s*"([^"]+)"', reply)
             
-            # Return in original format as fallback
-            parsed_response = {
-                "score": f"{individual_scores[0]}/100" if individual_scores else "N/A",
-                "fit_line": "Analysis complete!",
-                "stylist_says": reply[:100] + "..." if len(reply) > 100 else reply,
-                "what_went_wrong": "Could not parse detailed feedback"
+            return {
+                "score": score_match.group(1) if score_match else "N/A",
+                "fit_line": fit_line_match.group(1) if fit_line_match else "Analysis complete!",
+                "stylist_says": stylist_says_match.group(1) if stylist_says_match else reply[:100] + "..." if len(reply) > 100 else reply,
+                "what_went_wrong": what_went_wrong_match.group(1) if what_went_wrong_match else "Could not parse detailed feedback",
+                "raw_reply": reply
             }
-            score = parsed_response["score"]
-            fit_line = parsed_response["fit_line"]
-            stylist_says = parsed_response["stylist_says"]
-            what_went_wrong = parsed_response["what_went_wrong"]
-
-        # Create scan record in database with single score
-        scan_success = db.create_scan(
-            scan_id=scan_id,
-            user_id=user_id,
-            video_path=file_path,  # This will be video_path for video, photo_path for photo
-            image_paths=frame_paths,
-            individual_scores=individual_scores,  # Will contain single score
-            feedback=reply
-        )
-
-        if not scan_success:
-            return JSONResponse(status_code=500, content={"error": "Failed to save scan data"})
-
-        # Store initial chat messages with updated system message for future chats
+    
+    def _extract_scores(self, score: str, raw_reply: str) -> list:
+        """Extract numeric scores from response"""
+        score_matches = re.findall(r'(\d+)/100', score)
+        if score_matches:
+            return [int(score_matches[0])]
+        
+        # Try extracting from raw reply
+        score_matches = re.findall(r'(\d+)/100', raw_reply)
+        if score_matches:
+            return [int(score_matches[0])]
+        
+        return []
+    
+    async def _save_chat_messages(self, scan_id: str, reply: str, input_type: str):
+        """Save chat messages to database"""
         chat_system_message = (
             "You are NuFit — a fun, stylish fashion AI that gives punchy feedback and outfit ratings. "
             "You previously analyzed this user's outfit. Continue the conversation naturally, "
             "giving styling tips, answering fashion questions, and being encouraging but honest."
         )
+        
+        self.db.add_chat_message(scan_id, "system", chat_system_message)
+        self.db.add_chat_message(scan_id, "user", f"Please analyze the following outfit {input_type} using NuFit style rules and give me my FitScore and tips!")
+        self.db.add_chat_message(scan_id, "user", f"Analyze uploaded outfit {input_type}")
+        self.db.add_chat_message(scan_id, "assistant", reply)
+    
+    async def _stream_audio_response(self, websocket: WebSocket, text: str, scan_id: str):
+        """Stream audio response using OpenAI TTS"""
+        try:
+            await self._send_status(websocket, "generating_audio", "Generating audio response...")
+            
+            # Validate text before processing
+            if not text or not text.strip():
+                logger.warning("Empty text provided for audio generation")
+                return
+            
+            # Log the text being processed for debugging
+            logger.info(f"Processing audio for scan_id {scan_id}: {text[:100]}...")
+            
+            # Stream audio chunks
+            async for audio_chunk in generate_audio_stream(text, scan_id):
+                await websocket.send_text(json.dumps({
+                    "type": "audio_chunk",
+                    "data": audio_chunk
+                }))
+                
+                # Small delay to prevent overwhelming the client
+                await asyncio.sleep(0.01)
+                
+        except Exception as e:
+            logger.error(f"Error streaming audio: {e}")
+            await self._send_error(websocket, f"Audio generation failed: {str(e)}")
+    
+    async def _send_status(self, websocket: WebSocket, status: str, message: str):
+        """Send status update to client"""
+        await websocket.send_text(json.dumps({
+            "type": "status",
+            "status": status,
+            "message": message
+        }))
+    
+    async def _send_error(self, websocket: WebSocket, message: str):
+        """Send error message to client"""
+        await websocket.send_text(json.dumps({
+            "type": "error",
+            "message": message
+        }))
+    
+    async def _send_analysis_results(self, websocket: WebSocket, results: Dict[str, Any]):
+        """Send analysis results to client"""
+        await websocket.send_text(json.dumps({
+            "type": "analysis_results",
+            "data": results
+        }))
 
-        db.add_chat_message(scan_id, "system", chat_system_message)
-        db.add_chat_message(scan_id, "user", user_text_message["content"])
-        db.add_chat_message(scan_id, "user", f"Analyze uploaded outfit {input_type}")
-        db.add_chat_message(scan_id, "assistant", reply)
-
-        # Generate audio for the analysis response (base64)
-        audio_data = generate_response_audio_base64(reply, scan_id, "analysis")
-
-        # Build response data
-        response_data = {
-            "scan_id": scan_id,
-            "score": score,
-            "fit_line": fit_line,
-            "stylist_says": stylist_says,
-            "what_went_wrong": what_went_wrong,
-            "individual_scores": individual_scores,  # Will contain single score
-            "total_people": 1,  # Always 1 since we reject multiple people
-            "user_id": user_id,
-            "input_type": input_type  # Add this to indicate whether video or photo was used
-        }
-
-        # Add audio data if generation was successful
-        if audio_data:
-            response_data.update({
-                "audio_base64": audio_data["audio_base64"],
-                "audio_format": audio_data["audio_format"],
-                "audio_filename": audio_data["filename"]
-            })
-
-        return response_data
-
+# WebSocket endpoint implementation with URL token
+@app.websocket("/ws/analyze-outfit")
+async def websocket_analyze_outfit(websocket: WebSocket, token: str = Query(...)):
+    """WebSocket endpoint for outfit analysis with streaming audio and URL token authentication"""
+    
+    # Initialize analyzer
+    analyzer = WebSocketAnalyzeOutfit(db, UPLOAD_DIR, FRAME_DIR)
+    
+    # Authenticate user using token from URL
+    user_data = await analyzer.authenticate_user(token)
+    if not user_data:
+        await websocket.close(code=4001, reason="Authentication failed")
+        return
+    
+    await websocket.accept()
+    
+    try:
+        while True:
+            # Receive message from client
+            data = await websocket.receive_text()
+            message = json.loads(data)
+            
+            # Handle different message types
+            if message.get("type") == "analyze_outfit":
+                await analyzer.handle_analyze_outfit(websocket, message.get("data", {}), user_data)
+            else:
+                await websocket.send_text(json.dumps({
+                    "type": "error",
+                    "message": "Unknown message type"
+                }))
+                
+    except WebSocketDisconnect:
+        logger.info("WebSocket disconnected")
     except Exception as e:
-        print(f"Error in analyze_outfit: {e}")
-        import traceback
-        traceback.print_exc()
-        return JSONResponse(status_code=500, content={"error": str(e)})    
+        logger.error(f"WebSocket error: {e}")
+        try:
+            await websocket.send_text(json.dumps({
+                "type": "error",
+                "message": f"WebSocket error: {str(e)}"
+            }))
+        except:
+            pass  # Connection might be closed
+
+# Alternative: Direct WebSocket handler function with URL token
+async def handle_websocket_analyze_outfit(websocket: WebSocket, token: str, db, upload_dir: str, frame_dir: str):
+    """Direct WebSocket handler function for outfit analysis with URL token authentication"""
+    
+    analyzer = WebSocketAnalyzeOutfit(db, upload_dir, frame_dir)
+    
+    # Authenticate user using token from URL
+    user_data = await analyzer.authenticate_user(token)
+    if not user_data:
+        await websocket.close(code=4001, reason="Authentication failed")
+        return
+    
+    await websocket.accept()
+    
+    try:
+        while True:
+            data = await websocket.receive_text()
+            message = json.loads(data)
+            
+            if message.get("type") == "analyze_outfit":
+                await analyzer.handle_analyze_outfit(websocket, message.get("data", {}), user_data)
+            else:
+                await websocket.send_text(json.dumps({
+                    "type": "error",
+                    "message": "Unknown message type"
+                }))
+                
+    except WebSocketDisconnect:
+        logger.info("WebSocket disconnected")
+    except Exception as e:
+        logger.error(f"WebSocket error: {e}")
+        try:
+            await websocket.send_text(json.dumps({
+                "type": "error",
+                "message": f"WebSocket error: {str(e)}"
+            }))
+        except:
+            pass 
 
 # # New endpoint to serve audio files
 # @app.get("/audio/{filename}")

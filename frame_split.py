@@ -63,7 +63,6 @@ def extract_frames(video_path, output_dir, exclude_start=4, exclude_end=7):
         if success:
             filename = frames_subdir / f"frame_{i:03d}.jpg"
             cv2.imwrite(str(filename), frame)
-            print(f"Extracted frame at {sec:.2f}s → {filename}")
             count += 1
         else:
             print(f"Failed to extract frame at {sec:.2f}s")
