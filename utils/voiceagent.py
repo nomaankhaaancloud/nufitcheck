@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 class OpenAITTSStreamer:
     """OpenAI TTS Streaming client"""
     
-    def __init__(self, api_key: str = None, model: str = "tts-1", voice: str = "nova"):
+    def __init__(self, api_key: str = None, model: str = "tts-1", voice: str = "shimmer"):
         """
         Initialize OpenAI TTS Streamer
         
@@ -192,8 +192,8 @@ def generate_audio(text: str, voice_id: str = None, api_key: str = None) -> Opti
     """
     # Map voice_id to OpenAI voice names if needed
     voice_map = {
-        "default": "nova",
-        "female": "nova",
+        "default": "shimmer",
+        "female": "shimmer",
         "male": "onyx",
         "shimmer": "shimmer",
         "alloy": "alloy",
@@ -201,7 +201,7 @@ def generate_audio(text: str, voice_id: str = None, api_key: str = None) -> Opti
         "fable": "fable"
     }
     
-    voice = voice_map.get(voice_id, "nova")
+    voice = voice_map.get(voice_id, "shimmer")
     streamer = OpenAITTSStreamer(voice=voice)
     
     return streamer.generate_audio_sync(text)
@@ -305,8 +305,8 @@ async def generate_audio_stream(text: str, scan_id: str, voice_id: str = None, a
     """
     # Map voice_id to OpenAI voice names if needed
     voice_map = {
-        "default": "nova",
-        "female": "nova",
+        "default": "shimmer",
+        "female": "shimmer",
         "male": "onyx",
         "shimmer": "shimmer",
         "alloy": "alloy",
@@ -314,7 +314,7 @@ async def generate_audio_stream(text: str, scan_id: str, voice_id: str = None, a
         "fable": "fable"
     }
     
-    voice = voice_map.get(voice_id, "nova")
+    voice = voice_map.get(voice_id, "shimmer")
     streamer = OpenAITTSStreamer(voice=voice)
     
     async for chunk in streamer.generate_audio_stream(text, scan_id):
