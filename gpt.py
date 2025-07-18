@@ -75,7 +75,7 @@ def chat_with_gpt(messages: List[Dict], model: str = "gpt-4o", max_tokens: int =
             model=model,
             messages=messages,
             max_tokens=max_tokens,
-            temperature=0.5
+            temperature=1.2
         )
         
         return response.choices[0].message.content
