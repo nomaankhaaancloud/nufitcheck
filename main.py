@@ -1061,26 +1061,38 @@ class StreamingTranscriber:
                     "Keep responses very concise (1-2 sentences max) for real-time voice chat. "
                     "Speak like a cool, supportive friend who knows fashion. "
                     "Be helpful, encouraging, and give practical fashion advice. "
-                    "You previously analyzed this user's outfit and gave them a score. "
-                    "Reference that analysis when relevant, but respond conversationally. "
+                    "You previously analyzed this user's outfit and gave them a detailed score and feedback. "
+                    "Use that analysis to answer questions about your rating and recommendations. "
                     "If user asks anything unrelated to fashion or styling tips, tell user to stick to the topic. "
                 )
             }
             
             gpt_messages = [chat_system_message]
             
+            # Include the full original analysis as context
             if original_analysis:
                 try:
                     parsed_analysis = json.loads(original_analysis.strip())
-                    context_message = {
+                    # Create a comprehensive context message with all analysis details
+                    analysis_context = {
                         "role": "assistant",
-                        "content": f"I previously analyzed your outfit and gave you a {parsed_analysis.get('score', 'N/A')} score. {parsed_analysis.get('stylist_says', '')}"
+                        "content": f"""I previously analyzed your outfit with the following details:
+    - Overall Score: {parsed_analysis.get('score', 'N/A')}/10
+    - Style Category: {parsed_analysis.get('style_category', 'N/A')}
+    - Color Harmony: {parsed_analysis.get('color_harmony', 'N/A')}
+    - Fit Assessment: {parsed_analysis.get('fit_assessment', 'N/A')}
+    - Occasion Appropriateness: {parsed_analysis.get('occasion_appropriateness', 'N/A')}
+    - Styling Tips: {parsed_analysis.get('styling_tips', 'N/A')}
+    - My Comment: {parsed_analysis.get('stylist_says', 'N/A')}
+
+    The scoring was based on: fit and silhouette, color coordination, style coherence, occasion appropriateness, and overall fashion sense."""
                     }
-                    gpt_messages.append(context_message)
-                except:
+                    gpt_messages.append(analysis_context)
+                except json.JSONDecodeError:
+                    # Fallback: include the raw analysis if JSON parsing fails
                     gpt_messages.append({
                         "role": "assistant", 
-                        "content": "I previously analyzed your outfit and provided feedback."
+                        "content": f"I previously analyzed your outfit. Here's my original analysis: {original_analysis[:500]}..."
                     })
             
             gpt_messages.extend(filtered_history[-10:])
@@ -1563,8 +1575,8 @@ async def process_chat_message(scan_id: str, user_email: str, message_data: dict
                 "Keep responses concise (2-3 sentences max) for real-time chat. "
                 "Speak like a cool, supportive friend who knows fashion. "
                 "Be helpful, encouraging, and give practical fashion advice. "
-                "You previously analyzed this user's outfit and gave them a score. "
-                "Reference that analysis when relevant, but respond conversationally. "
+                "You previously analyzed this user's outfit and gave them a detailed score and feedback. "
+                "Use that analysis to answer questions about your rating and recommendations. "
                 "If user asks anything unrelated to fashion or styling tips, tell user to stick to the topic. "
                 "For real-time chat, keep responses short and engaging."
             )
@@ -1572,18 +1584,30 @@ async def process_chat_message(scan_id: str, user_email: str, message_data: dict
         
         gpt_messages = [chat_system_message]
         
+        # Include the full original analysis as context
         if original_analysis:
             try:
                 parsed_analysis = json.loads(original_analysis.strip())
-                context_message = {
+                # Create a comprehensive context message with all analysis details
+                analysis_context = {
                     "role": "assistant",
-                    "content": f"I previously analyzed your outfit and gave you a {parsed_analysis.get('score', 'N/A')} score. {parsed_analysis.get('stylist_says', '')}"
+                    "content": f"""I previously analyzed your outfit with the following details:
+- Overall Score: {parsed_analysis.get('score', 'N/A')}/10
+- Style Category: {parsed_analysis.get('style_category', 'N/A')}
+- Color Harmony: {parsed_analysis.get('color_harmony', 'N/A')}
+- Fit Assessment: {parsed_analysis.get('fit_assessment', 'N/A')}
+- Occasion Appropriateness: {parsed_analysis.get('occasion_appropriateness', 'N/A')}
+- Styling Tips: {parsed_analysis.get('styling_tips', 'N/A')}
+- My Comment: {parsed_analysis.get('stylist_says', 'N/A')}
+
+The scoring was based on: fit and silhouette, color coordination, style coherence, occasion appropriateness, and overall fashion sense."""
                 }
-                gpt_messages.append(context_message)
-            except:
+                gpt_messages.append(analysis_context)
+            except json.JSONDecodeError:
+                # Fallback: include the raw analysis if JSON parsing fails
                 gpt_messages.append({
                     "role": "assistant", 
-                    "content": "I previously analyzed your outfit and provided feedback."
+                    "content": f"I previously analyzed your outfit. Here's my original analysis: {original_analysis[:500]}..."
                 })
         
         gpt_messages.extend(filtered_history)
@@ -2779,7 +2803,7 @@ async def handle_websocket_analyze_outfit(websocket: WebSocket, token: str, db, 
             }))
         except:
             pass
-        
+
 # # New endpoint to serve audio files
 # @app.get("/audio/{filename}")
 # async def get_audio_file(filename: str):
