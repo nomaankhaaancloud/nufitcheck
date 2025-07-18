@@ -2189,15 +2189,6 @@ class WebSocketAnalyzeOutfit:
         self.upload_dir = upload_dir
         self.frame_dir = frame_dir
         self.tts_streamer = OpenAITTSStreamer()
-        
-        # Predefined greetings for audio
-        self.greetings = [
-            "Ouuu okay! I just caught your upload — I see you just scanned your outfit. Let's get into this one together.",
-            "Heyyy! Fresh drop alert — I see you just scanned your fit. I'm ready to check it out with you. Let's see what's cooking.",
-            "Ouuu you just uploaded this? I'm on it! Let's break it down together.",
-            "Okay okay, new scan just came through! I'm hyped to help you style this one up.",
-            "Ohhh you just scanned a new fit? Say less — I'm right here with you. Let's dive in."
-        ]
     
     async def authenticate_user(self, token: str) -> Optional[Dict[str, Any]]:
         """Authenticate user using token from URL"""
@@ -2301,6 +2292,7 @@ class WebSocketAnalyzeOutfit:
             
             # Extract analysis components
             score = analysis_result.get("score", "N/A")
+            score_line = analysis_result.get("score_line", "")
             fit_line = analysis_result.get("fit_line", "")
             stylist_says = analysis_result.get("stylist_says", "")
             what_went_wrong = analysis_result.get("what_went_wrong", "")
@@ -2330,6 +2322,7 @@ class WebSocketAnalyzeOutfit:
             await self._send_analysis_results(websocket, {
                 "scan_id": scan_id,
                 "score": score,
+                "score_line": score_line,
                 "fit_line": fit_line,
                 "stylist_says": stylist_says,
                 "what_went_wrong": what_went_wrong,
@@ -2359,7 +2352,7 @@ class WebSocketAnalyzeOutfit:
         try:
             # Extract the key components
             greeting = analysis_result.get("greeting", "")
-            score = analysis_result.get("score", "N/A")
+            score_line = analysis_result.get("score_line", "")
             fit_line = analysis_result.get("fit_line", "")
             stylist_says = analysis_result.get("stylist_says", "")
             what_went_wrong = analysis_result.get("what_went_wrong", "")
@@ -2376,7 +2369,7 @@ class WebSocketAnalyzeOutfit:
             
             # Clean all components
             clean_greeting = clean_text(greeting)
-            clean_score = clean_text(score)
+            clean_score_line = clean_text(score_line)
             clean_fit_line = clean_text(fit_line)
             clean_stylist_says = clean_text(stylist_says)
             clean_what_went_wrong = clean_text(what_went_wrong)
@@ -2384,15 +2377,13 @@ class WebSocketAnalyzeOutfit:
             # Construct a natural, conversational response starting with greeting
             audio_parts = []
             
-            # Add greeting first (fallback to random greeting if not provided by LLM)
+            # Add greeting first
             if clean_greeting:
                 audio_parts.append(clean_greeting)
-            else:
-                # Use a random greeting as fallback
-                audio_parts.append(random.choice(self.greetings))
             
-            if clean_score and clean_score != "N/A":
-                audio_parts.append(f"Your outfit scored {clean_score}")
+            # Add score line instead of basic score
+            if clean_score_line:
+                audio_parts.append(clean_score_line)
             
             if clean_fit_line:
                 audio_parts.append(clean_fit_line)
@@ -2414,9 +2405,8 @@ class WebSocketAnalyzeOutfit:
             
         except Exception as e:
             logger.error(f"Error creating audio-friendly text: {e}")
-            # Fallback with greeting
-            fallback_greeting = random.choice(self.greetings)
-            return f"{fallback_greeting}. Your outfit analysis is complete! Check the results above."
+            # Fallback without predefined greeting
+            return "Your outfit analysis is complete! Check the results above."
     
     async def _process_video(self, file_bytes: bytes, filename: str, scan_id: str, scan_frame_dir: str) -> str:
         """Process video file and extract frames"""
@@ -2512,10 +2502,20 @@ class WebSocketAnalyzeOutfit:
                 "{\n"
                 "  \"greeting\": \"Ouuu okay! I just caught your upload — I see you just scanned your outfit. Let's get into this one together.\",\n"
                 "  \"score\": \"65/100\",\n"
+                "  \"score_line\": \"If I had to rate it… I'd say 65 out of 100.\",\n"
                 "  \"fit_line\": \"Bro, this look is giving... laundry day vibes.\",\n"
                 "  \"stylist_says\": \"Way too casual for a stylish day out. That oversized tee and those shoes just don't click.\",\n"
                 "  \"what_went_wrong\": \"Poor coordination, and the fit looks like it was picked in the dark. Better color harmony and a strong piece (like a jacket or shoes) would help.\"\n"
                 "}\n\n"
+
+                "SCORE_LINE EXAMPLES:\n"
+                "Use natural, conversational ways to present the score. Examples:\n"
+                "• \"If I had to rate it… I'd say 85 out of 100.\"\n"
+                "• \"Personally, I'd give this one around a 72.\"\n"
+                "• \"For me? This feels like a clean 92 today.\"\n"
+                "• \"I'm thinking this hits about 78 out of 100.\"\n"
+                "• \"Real talk? This is sitting at like 83 for me.\"\n"
+                "It must NEVER just say: \"Your score is 85.\" Always make it conversational and personal.\n\n"
 
                 "SCORING RULES:\n"
                 "• Matching tones: +10\n"
@@ -2536,7 +2536,7 @@ class WebSocketAnalyzeOutfit:
                 "• Below 50: Be funny-brutal — real talk only, but no mean stuff. Be the bestie who says what they need to hear.\n\n"
 
                 "IMPORTANT:\n"
-                "For initial analysis, return ONLY the JSON with the greeting field included. No markdown. No extra text. Just the JSON like you're texting it to your friend straight up.\n"
+                "For initial analysis, return ONLY the JSON with the greeting and score_line fields included. No markdown. No extra text. Just the JSON like you're texting it to your friend straight up.\n"
             )
         }
 
@@ -2552,7 +2552,7 @@ class WebSocketAnalyzeOutfit:
                 {
                     "type": "text",
                     "text": (
-                        "Analyze the outfit in the provided images. First, confirm that only one person is present by focusing on the primary subject (typically in the foreground or center of the image, e.g., the person taking a selfie). A 'person' is a human figure with clear facial features or a distinct body outline. Ignore reflections, shadows, mannequins, posters, or background figures. If more than one distinct human figure is clearly present in the foreground, return the multiple_people error JSON. If only one person is detected or reasonably assumed, analyze their outfit using NuFit JSON format: greeting, score, fit_line, stylist_says, what_went_wrong. Keep it short, voice-friendly, and return only valid JSON, no markdown formatting."
+                        "Analyze the outfit in the provided images. First, confirm that only one person is present by focusing on the primary subject (typically in the foreground or center of the image, e.g., the person taking a selfie). A 'person' is a human figure with clear facial features or a distinct body outline. Ignore reflections, shadows, mannequins, posters, or background figures. If more than one distinct human figure is clearly present in the foreground, return the multiple_people error JSON. If only one person is detected or reasonably assumed, analyze their outfit using NuFit JSON format: greeting, score, score_line, fit_line, stylist_says, what_went_wrong. Keep it short, voice-friendly, and return only valid JSON, no markdown formatting."
                     )
                 }
             ] + image_messages
@@ -2608,13 +2608,15 @@ class WebSocketAnalyzeOutfit:
             # Enhanced fallback parsing using regex
             greeting_match = re.search(r'"greeting":\s*"([^"]+)"', reply)
             score_match = re.search(r'"score":\s*"([^"]+)"', reply)
+            score_line_match = re.search(r'"score_line":\s*"([^"]+)"', reply)
             fit_line_match = re.search(r'"fit_line":\s*"([^"]+)"', reply)
             stylist_says_match = re.search(r'"stylist_says":\s*"([^"]+)"', reply)
             what_went_wrong_match = re.search(r'"what_went_wrong":\s*"([^"]+)"', reply)
             
             return {
-                "greeting": greeting_match.group(1) if greeting_match else random.choice(self.greetings),
+                "greeting": greeting_match.group(1) if greeting_match else "",
                 "score": score_match.group(1) if score_match else "N/A",
+                "score_line": score_line_match.group(1) if score_line_match else "Analysis complete!",
                 "fit_line": fit_line_match.group(1) if fit_line_match else "Analysis complete!",
                 "stylist_says": stylist_says_match.group(1) if stylist_says_match else reply[:100] + "..." if len(reply) > 100 else reply,
                 "what_went_wrong": what_went_wrong_match.group(1) if what_went_wrong_match else "Could not parse detailed feedback",
@@ -2776,8 +2778,8 @@ async def handle_websocket_analyze_outfit(websocket: WebSocket, token: str, db, 
                 "message": f"WebSocket error: {str(e)}"
             }))
         except:
-            pass 
-
+            pass
+        
 # # New endpoint to serve audio files
 # @app.get("/audio/{filename}")
 # async def get_audio_file(filename: str):
