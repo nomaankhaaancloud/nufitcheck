@@ -1592,15 +1592,15 @@ async def process_chat_message(scan_id: str, user_email: str, message_data: dict
                 analysis_context = {
                     "role": "assistant",
                     "content": f"""I previously analyzed your outfit with the following details:
-- Overall Score: {parsed_analysis.get('score', 'N/A')}/10
-- Style Category: {parsed_analysis.get('style_category', 'N/A')}
-- Color Harmony: {parsed_analysis.get('color_harmony', 'N/A')}
-- Fit Assessment: {parsed_analysis.get('fit_assessment', 'N/A')}
-- Occasion Appropriateness: {parsed_analysis.get('occasion_appropriateness', 'N/A')}
-- Styling Tips: {parsed_analysis.get('styling_tips', 'N/A')}
-- My Comment: {parsed_analysis.get('stylist_says', 'N/A')}
+                    - Overall Score: {parsed_analysis.get('score', 'N/A')}/10
+                    - Style Category: {parsed_analysis.get('style_category', 'N/A')}
+                    - Color Harmony: {parsed_analysis.get('color_harmony', 'N/A')}
+                    - Fit Assessment: {parsed_analysis.get('fit_assessment', 'N/A')}
+                    - Occasion Appropriateness: {parsed_analysis.get('occasion_appropriateness', 'N/A')}
+                    - Styling Tips: {parsed_analysis.get('styling_tips', 'N/A')}
+                    - My Comment: {parsed_analysis.get('stylist_says', 'N/A')}
 
-The scoring was based on: fit and silhouette, color coordination, style coherence, occasion appropriateness, and overall fashion sense."""
+                    The scoring was based on: fit and silhouette, color coordination, style coherence, occasion appropriateness, and overall fashion sense."""
                 }
                 gpt_messages.append(analysis_context)
             except json.JSONDecodeError:
@@ -1807,17 +1807,32 @@ async def chat_endpoint(
         chat_system_message = {
             "role": "system",
             "content": (
-                "You are NuFit — a fun, stylish fashion AI assistant who always responds in English, even if the user speaks another language."
-                "You are now in CHAT MODE, not analysis mode. "
-                "IMPORTANT: Do NOT return JSON responses. Respond naturally in conversation. "
-                "Speak like a cool, supportive friend who knows fashion. "
-                "Be helpful, encouraging, and give practical fashion advice. "
-                "You previously analyzed this user's outfit and gave them a score. "
-                "Reference that analysis when relevant, but respond conversationally. "
-                "Answer their questions directly and naturally. "
-                "If user asks anything unrelated to fashion or styling tips, tell user to stick to the topic"
+                "You are NuFit — a fun, stylish fashion AI assistant. "
+                "You are now in REAL-TIME CHAT MODE. "
+                "IMPORTANT RULES:\n"
+                "• Do NOT return JSON responses. Respond naturally like texting a friend.\n"
+                "• Keep responses short (1–3 sentences) for real-time chat.\n"
+                "• Speak like a cool, supportive bestie who knows fashion.\n"
+                "• Be helpful, encouraging, and give practical fashion advice based on their scanned outfit.\n\n"
+
+                "CONVERSATION FLOW:\n"
+                "• If the user's follow-up question is about their outfit, FitScore, styling tips, or changes, respond with helpful and stylish advice. Examples:\n"
+                "  - 'Why did I get that score?' → Explain main reason casually.\n"
+                "  - 'What should I change?' → Suggest 1–2 easy fixes.\n"
+                "  - 'What shoes would match?' → Recommend matching options.\n"
+                "Keep it friendly and on-point.\n\n"
+
+                "• ONLY when the user's question is clearly unrelated to fashion (e.g., 'Tell me a joke', 'How’s the weather?'), then respond:\n"
+                "  'Let’s keep the conversation about fashion.'\n\n"
+
+                "TONE:\n"
+                "• Casual, playful, hype them up.\n"
+                "• Example: 'Ouu okay, wanna know why you got that score? That color clash was wild, bestie.'\n"
+                "• Never sound robotic or overly formal.\n"
+                "• Use slang naturally, but keep clarity.\n"
             )
         }
+
 
         # Build the message list for GPT
         gpt_messages = [chat_system_message]
@@ -2201,9 +2216,6 @@ import logging
 from utils.voiceagent import generate_audio_stream, OpenAITTSStreamer
 from utils.key_func import verify_token, get_current_user_email  # Add this import
 from database import DatabaseManager  # Add this import
-# Import your database and utility functions
-# from your_db_module import get_or_create_user_profile, create_scan, add_chat_message
-# from your_utils import extract_frames, load_image_messages, chat_with_gpt
 
 logger = logging.getLogger(__name__)
 
@@ -2253,6 +2265,7 @@ class WebSocketAnalyzeOutfit:
             scan_id = data.get("scan_id", str(uuid.uuid4()))
             user_email = user_data.get("email")  # Get email from authenticated user data
             input_type = data.get("input_type")  # "video" or "photo"
+            request_type = data.get("request_type", "scan")  # "scan" or "upload", default to "scan"
             file_data = data.get("file_data")  # base64 encoded file data
             filename = data.get("filename")
             
@@ -2263,6 +2276,10 @@ class WebSocketAnalyzeOutfit:
             
             if not input_type or input_type not in ["video", "photo"]:
                 await self._send_error(websocket, "Invalid input type. Must be 'video' or 'photo'")
+                return
+            
+            if not request_type or request_type not in ["scan", "upload"]:
+                await self._send_error(websocket, "Invalid request type. Must be 'scan' or 'upload'")
                 return
             
             if not file_data or not filename:
@@ -2307,8 +2324,8 @@ class WebSocketAnalyzeOutfit:
             # Send analysis status
             await self._send_status(websocket, "analyzing", "Analyzing your outfit...")
             
-            # Perform outfit analysis
-            analysis_result = await self._analyze_outfit_with_gpt(image_messages, input_type)
+            # Perform outfit analysis with request_type
+            analysis_result = await self._analyze_outfit_with_gpt(image_messages, input_type, request_type)
             
             if analysis_result.get("error") == "multiple_people":
                 await self._send_error(websocket, analysis_result.get("message", "Multiple people detected"))
@@ -2340,7 +2357,7 @@ class WebSocketAnalyzeOutfit:
                 return
             
             # Save chat messages
-            await self._save_chat_messages(scan_id, analysis_result.get("raw_reply", ""), input_type)
+            await self._save_chat_messages(scan_id, analysis_result.get("raw_reply", ""), input_type, request_type)
             
             # Send analysis results
             await self._send_analysis_results(websocket, {
@@ -2354,7 +2371,8 @@ class WebSocketAnalyzeOutfit:
                 "individual_scores": individual_scores,
                 "total_people": 1,
                 "user_id": user_id,
-                "input_type": input_type
+                "input_type": input_type,
+                "request_type": request_type
             })
             
             # Create user-friendly audio text with greeting
@@ -2478,8 +2496,27 @@ class WebSocketAnalyzeOutfit:
         
         return frame_paths
     
-    async def _analyze_outfit_with_gpt(self, image_messages: list, input_type: str) -> Dict[str, Any]:
+    def _get_greeting_variants(self, request_type: str) -> list:
+        """Get greeting variants based on request type"""
+        action_word = "scanned" if request_type == "scan" else "uploaded"
+        
+        return [
+            f"Ouuu okay! I just caught your {action_word} fit — I see you just {action_word} your outfit. Let's get into this one together.",
+            f"Heyyy! Fresh drop alert — I see you just {action_word} your fit. I'm ready to check it out with you. Let's see what's cooking.",
+            f"Ouuu you just {action_word} this? I'm on it! Let's break it down together.",
+            f"Okay okay, new {request_type} just came through! I'm hyped to help you style this one up.",
+            f"Ohhh you just {action_word} a new fit? Say less — I'm right here with you. Let's dive in."
+        ]
+    
+    async def _analyze_outfit_with_gpt(self, image_messages: list, input_type: str, request_type: str) -> Dict[str, Any]:
         """Analyze outfit using GPT with the provided system message"""
+        
+        # Get greeting variants based on request type
+        greeting_variants = self._get_greeting_variants(request_type)
+        greeting_examples = "\n".join([f"• '{variant}'" for variant in greeting_variants])
+        
+        action_word = "scanned" if request_type == "scan" else "uploaded"
+        
         system_message = {
             "role": "system",
             "content": (
@@ -2501,14 +2538,11 @@ class WebSocketAnalyzeOutfit:
                 "You know that fashion isn't about rules — it's about *feeling yourself*.\n"
                 "You're here to hype the user up, keep it real, and make them feel dope in their own skin.\n\n"
 
-                "INITIAL OUTFIT ANALYSIS MODE:\n"
-                "When an outfit scan comes in, act like it just happened LIVE. Always start with a fun greeting like:\n"
-                "• 'Ouuu okay! I just caught your upload — I see you just scanned your outfit. Let's get into this one together.'\n"
-                "• 'Heyyy! Fresh drop alert — I see you just scanned your fit. I'm ready to check it out with you. Let's see what's cooking.'\n"
-                "• 'Ouuu you just uploaded this? I'm on it! Let's break it down together.'\n"
-                "• 'Okay okay, new scan just came through! I'm hyped to help you style this one up.'\n"
-                "• 'Ohhh you just scanned a new fit? Say less — I'm right here with you. Let's dive in.'\n"
-                "Rotate your greetings. Never repeat the same one twice in a row.\n\n"
+                f"INITIAL OUTFIT ANALYSIS MODE:\n"
+                f"When an outfit {request_type} comes in, act like it just happened LIVE. Always start with a fun greeting like:\n"
+                f"{greeting_examples}\n"
+                f"Rotate your greetings. Never repeat the same one twice in a row.\n"
+                f"Remember: The user just {action_word} their fit, so use that specific action in your greeting.\n\n"
 
                 "HOW TO ANALYZE:\n"
                 "First, figure out how many people are in the image. Focus on the primary subject — usually the one in the foreground or center. A 'person' means someone with a clear face or body shape. Ignore reflections, shadows, posters, mannequins, or people in the background.\n\n"
@@ -2516,15 +2550,15 @@ class WebSocketAnalyzeOutfit:
                 "IF MULTIPLE PEOPLE ARE IN THE FOREGROUND:\n"
                 "If more than one real person is clearly in front, return exactly this:\n"
                 "{\n"
-                "  \"error\": \"multiple_people\",\n"
-                "  \"message\": \"More than one person detected. Cannot scan the outfit. Please ensure only one person is visible in the video/photo.\"\n"
+                f"  \"error\": \"multiple_people\",\n"
+                f"  \"message\": \"More than one person detected. Cannot {request_type} the outfit. Please ensure only one person is visible in the video/photo.\"\n"
                 "}\n\n"
 
                 "IF ONE PERSON IS CLEARLY PRESENT:\n"
                 "If it's a solo selfie or there's one obvious person in front, go ahead with the analysis. If you're not sure (like someone in the background), assume it's the person in the front unless there are clearly two.\n"
                 "Return only the JSON in this format:\n"
                 "{\n"
-                "  \"greeting\": \"Ouuu okay! I just caught your upload — I see you just scanned your outfit. Let's get into this one together.\",\n"
+                f"  \"greeting\": \"Ouuu okay! I just caught your {action_word} fit — I see you just {action_word} your outfit. Let's get into this one together.\",\n"
                 "  \"score\": \"65/100\",\n"
                 "  \"score_line\": \"If I had to rate it… I'd say 65 out of 100.\",\n"
                 "  \"fit_line\": \"Bro, this look is giving... laundry day vibes.\",\n"
@@ -2553,14 +2587,30 @@ class WebSocketAnalyzeOutfit:
                 "• Clashing colors (e.g., red+orange): -10\n"
                 "But if a fit breaks rules and still eats? Give it the credit. And if it follows rules but looks boring? Keep it real.\n\n"
 
+                "IMPORTANT EXTRA RULE FOR 'what_went_wrong':\n"
+                "Always append ONE of these natural follow-up lines to the end of the 'what_went_wrong' sentence after a full stop:\n"
+                "• You feel me on that?\n"
+                "• Sound fair?\n"
+                "• What you thinking?\n"
+                "• You down for that change?\n"
+                "• Make sense to you?\n"
+                "• Let’s talk options if you’re not feeling it.\n"
+                "Rotate between them so it feels natural and conversational. Never use the same one twice in a row.\n"
+
+
                 "SCORE TONE GUIDE:\n"
-                "• 85 or higher: Go full hype mode. This outfit is 🔥\n"
+                "• 85 or higher: Go full hype mode. This outfit is fire\n"
                 "• 70–84: Be real — call out what's cool and what could glow up\n"
                 "• 50–69: Lightly drag them (with love). Keep it fun + helpful.\n"
                 "• Below 50: Be funny-brutal — real talk only, but no mean stuff. Be the bestie who says what they need to hear.\n\n"
+                
+                "Append ONE emoji at the end of the fit_line based on the score.\n"
+
+
+
 
                 "IMPORTANT:\n"
-                "For initial analysis, return ONLY the JSON with the greeting and score_line fields included. No markdown. No extra text. Just the JSON like you're texting it to your friend straight up.\n"
+                "For initial analysis, return ONLY the JSON with the greeting and score_line fields included. No markdown. No extra text. No extra symbols like ), ] outside of quotes. Just the JSON like you're texting it to your friend straight up.\n"
             )
         }
 
@@ -2576,7 +2626,7 @@ class WebSocketAnalyzeOutfit:
                 {
                     "type": "text",
                     "text": (
-                        "Analyze the outfit in the provided images. First, confirm that only one person is present by focusing on the primary subject (typically in the foreground or center of the image, e.g., the person taking a selfie). A 'person' is a human figure with clear facial features or a distinct body outline. Ignore reflections, shadows, mannequins, posters, or background figures. If more than one distinct human figure is clearly present in the foreground, return the multiple_people error JSON. If only one person is detected or reasonably assumed, analyze their outfit using NuFit JSON format: greeting, score, score_line, fit_line, stylist_says, what_went_wrong. Keep it short, voice-friendly, and return only valid JSON, no markdown formatting."
+                        f"Analyze the outfit in the provided images. First, confirm that only one person is present by focusing on the primary subject (typically in the foreground or center of the image, e.g., the person taking a selfie). A 'person' is a human figure with clear facial features or a distinct body outline. Ignore reflections, shadows, mannequins, posters, or background figures. If more than one distinct human figure is clearly present in the foreground, return the multiple_people error JSON. If only one person is detected or reasonably assumed, analyze their outfit using NuFit JSON format: greeting, score, score_line, fit_line, stylist_says, what_went_wrong. Keep it short, voice-friendly, and return only valid JSON, no markdown formatting. Note: This is a {request_type} request, so use appropriate language in the greeting."
                     )
                 }
             ] + image_messages
@@ -2626,10 +2676,10 @@ class WebSocketAnalyzeOutfit:
             if "multiple_people" in reply.lower() or "more than one person" in reply.lower():
                 return {
                     "error": "multiple_people",
-                    "message": "More than one person detected. Cannot scan the outfit."
+                    "message": f"More than one person detected. Cannot {request_type} the outfit."
                 }
             
-            # Enhanced fallback parsing using regex
+            # Enhanced fallback parsing using regex with request_type awareness
             greeting_match = re.search(r'"greeting":\s*"([^"]+)"', reply)
             score_match = re.search(r'"score":\s*"([^"]+)"', reply)
             score_line_match = re.search(r'"score_line":\s*"([^"]+)"', reply)
@@ -2637,8 +2687,11 @@ class WebSocketAnalyzeOutfit:
             stylist_says_match = re.search(r'"stylist_says":\s*"([^"]+)"', reply)
             what_went_wrong_match = re.search(r'"what_went_wrong":\s*"([^"]+)"', reply)
             
+            # Fallback greeting based on request_type
+            fallback_greeting = f"Ouuu okay! I just saw you {action_word} your fit. Let's check it out together."
+            
             return {
-                "greeting": greeting_match.group(1) if greeting_match else "",
+                "greeting": greeting_match.group(1) if greeting_match else fallback_greeting,
                 "score": score_match.group(1) if score_match else "N/A",
                 "score_line": score_line_match.group(1) if score_line_match else "Analysis complete!",
                 "fit_line": fit_line_match.group(1) if fit_line_match else "Analysis complete!",
@@ -2660,17 +2713,19 @@ class WebSocketAnalyzeOutfit:
         
         return []
     
-    async def _save_chat_messages(self, scan_id: str, reply: str, input_type: str):
+    async def _save_chat_messages(self, scan_id: str, reply: str, input_type: str, request_type: str):
         """Save chat messages to database"""
+        action_word = "scanned" if request_type == "scan" else "uploaded"
+        
         chat_system_message = (
             "You are NuFit — a fun, stylish fashion AI that gives punchy feedback and outfit ratings. "
-            "You previously analyzed this user's outfit. Continue the conversation naturally, "
+            f"You previously analyzed this user's {action_word} outfit. Continue the conversation naturally, "
             "giving styling tips, answering fashion questions, and being encouraging but honest."
         )
         
         self.db.add_chat_message(scan_id, "system", chat_system_message)
         self.db.add_chat_message(scan_id, "user", f"Please analyze the following outfit {input_type} using NuFit style rules and give me my FitScore and tips!")
-        self.db.add_chat_message(scan_id, "user", f"Analyze uploaded outfit {input_type}")
+        self.db.add_chat_message(scan_id, "user", f"Analyze {action_word} outfit {input_type}")
         self.db.add_chat_message(scan_id, "assistant", reply)
     
     async def _stream_audio_response(self, websocket: WebSocket, text: str, scan_id: str):
