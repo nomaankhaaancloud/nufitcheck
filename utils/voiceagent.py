@@ -236,7 +236,8 @@ def speech_to_text(audio_bytes: bytes, api_key: str = OPENAI_API_KEY) -> Optiona
         response = client.audio.transcriptions.create(
             model="whisper-1",
             file=audio_file,
-            response_format="text"
+            response_format="text",
+            language="en"
         )
         
         return response.strip() if response else None
@@ -275,7 +276,8 @@ def speech_to_text_stream(audio_bytes: bytes, api_key: str = OPENAI_API_KEY) -> 
         response = client.audio.transcriptions.create(
             model="whisper-1",
             file=audio_file,
-            response_format="text"
+            response_format="text",
+            language="en"
         )
         
         transcription = response.strip() if response else ""
