@@ -1056,14 +1056,38 @@ class StreamingTranscriber:
                 "role": "system",
                 "content": (
                     "You are NuFit — a fun, stylish fashion AI assistant. "
-                    "You are now in REAL-TIME VOICE CHAT MODE. "
-                    "IMPORTANT: Do NOT return JSON responses. Respond naturally in conversation. "
-                    "Keep responses very concise (1-2 sentences max) for real-time voice chat. "
-                    "Speak like a cool, supportive friend who knows fashion. "
-                    "Be helpful, encouraging, and give practical fashion advice. "
-                    "You previously analyzed this user's outfit and gave them a detailed score and feedback. "
-                    "Use that analysis to answer questions about your rating and recommendations. "
-                    "If user asks anything unrelated to fashion or styling tips, tell user to stick to the topic. "
+                    "You are in REAL-TIME CHAT MODE.\n\n"
+
+                    "ABSOLUTE OVERRIDE RULES:\n"
+                        "1. You MUST NEVER say 'I can't see images, outfit', 'I can't analyze photos', or anything similar.\n"
+                        "2. If user says 'describe my outfit' or similar, ALWAYS use the previous analysis I provide. "
+                        "If no details exist, make a positive, creative guess — never refuse.\n"
+                        "3. Assume the outfit was already analyzed and reference that.\n"
+                        "4. Respond like a hype bestie: casual, short (1–3 sentences), fun.\n"
+
+                    "IMPORTANT RULES:\n"
+                    "• DO NOT return JSON. Respond naturally like texting a friend.\n"
+                    "• Keep responses short (1–3 sentences) for real-time chat.\n"
+                    "• Speak like a cool, supportive bestie who knows fashion.\n"
+                    "• Always give practical, hype, and stylish advice.\n"
+                    "  Example response: 'I've already checked your fit earlier! Want me to break it down or give extra tips?'\n"
+                    "• If the question is vague (like 'you', 'when', 'then'), ask for clarification in a fun tone:\n"
+                    "  Example: 'Bestie, spill more tea—what do you mean?' \n\n"
+
+                    "CONVERSATION FLOW:\n"
+                    "• Use the previous analysis context to answer questions about their outfit, score, or tips.\n"
+                    "• Examples:\n"
+                    "   - 'Why did I get that score?' → Explain casually.\n"
+                    "   - 'What should I change?' → Give 1–2 easy fixes.\n"
+                    "   - 'What shoes match?' → Suggest matching options.\n"
+                    "• Keep it hype, short, and clear.\n"
+                    "• If the user goes off-topic (like jokes, weather), reply: 'Let’s keep this about your fit, bestie.'\n\n"
+
+                    "TONE:\n"
+                    "• Casual, playful, supportive.\n"
+                    "• Use slang naturally but keep clarity.\n"
+                    "• Example: 'Ouuu okay, wanna know why you got that score? That color clash was wild, bestie.'\n"
+                    "• Never sound robotic or formal.\n"
                 )
             }
             
@@ -1072,50 +1096,60 @@ class StreamingTranscriber:
             # Include the full original analysis as context
             if original_analysis:
                 try:
-                    parsed_analysis = json.loads(original_analysis.strip())
-                    # Create a comprehensive context message with all analysis details
+                    parsed = json.loads(original_analysis.strip())
                     analysis_context = {
                         "role": "assistant",
-                        "content": f"""I previously analyzed your outfit with the following details:
-    - Overall Score: {parsed_analysis.get('score', 'N/A')}/10
-    - Style Category: {parsed_analysis.get('style_category', 'N/A')}
-    - Color Harmony: {parsed_analysis.get('color_harmony', 'N/A')}
-    - Fit Assessment: {parsed_analysis.get('fit_assessment', 'N/A')}
-    - Occasion Appropriateness: {parsed_analysis.get('occasion_appropriateness', 'N/A')}
-    - Styling Tips: {parsed_analysis.get('styling_tips', 'N/A')}
-    - My Comment: {parsed_analysis.get('stylist_says', 'N/A')}
+                        "content": f"""Previous outfit analysis:
 
-    The scoring was based on: fit and silhouette, color coordination, style coherence, occasion appropriateness, and overall fashion sense."""
+    Greeting: {parsed.get('greeting', '')}
+    Score: {parsed.get('score', '')}
+    Score Line: {parsed.get('score_line', '')}
+    Fit Vibe: {parsed.get('fit_line', '')}
+    Stylist Says: {parsed.get('stylist_says', '')}
+    What Went Wrong: {parsed.get('what_went_wrong', '')}
+
+    Keep this in mind when answering the user."""
                     }
-                    gpt_messages.append(analysis_context)
                 except json.JSONDecodeError:
-                    # Fallback: include the raw analysis if JSON parsing fails
-                    gpt_messages.append({
-                        "role": "assistant", 
-                        "content": f"I previously analyzed your outfit. Here's my original analysis: {original_analysis[:500]}..."
-                    })
-            
-            gpt_messages.extend(filtered_history[-10:])
-            
-            reply = chat_with_gpt(gpt_messages, max_tokens=100)
-            
+                    analysis_context = {
+                        "role": "assistant",
+                        "content": f"Previous analysis summary: {original_analysis[:200]}..."
+                    }
+
+                gpt_messages.append(analysis_context)  # ✅ THIS WAS MISSING
+
+            # ✅ Add only user messages to avoid old assistant fallbacks
+            user_only_history = [msg for msg in filtered_history if msg["role"] == "user"][-5:]
+            gpt_messages.extend(user_only_history)
+
+            # ✅ Debug print
+            # print("\n[DEBUG] GPT MESSAGES SENT:")
+            # for i, msg in enumerate(gpt_messages):
+            #     print(f"--- Message {i+1} ---")
+            #     print(f"Role: {msg['role']}")
+            #     print("Content:")
+            #     print(msg['content'])
+            #     print("----------------------\n")
+
+            reply = chat_with_gpt(gpt_messages, max_tokens=120)
+
             if not reply:
                 await self.manager.send_message(self.scan_id, self.user_email, {
                     "type": "error",
                     "message": "Failed to generate response"
                 })
                 return
-            
+
             db.add_chat_message(self.scan_id, "assistant", reply)
-            
+
             await self.manager.send_message(self.scan_id, self.user_email, {
                 "type": "response",
                 "message": reply,
                 "timestamp": datetime.now().isoformat()
             })
-            
+
             asyncio.create_task(self._generate_and_send_audio_stream(reply))
-            
+
         except Exception as e:
             logger.error(f"Error generating chat response: {e}")
             await self.manager.send_message(self.scan_id, self.user_email, {
@@ -1570,17 +1604,41 @@ async def process_chat_message(scan_id: str, user_email: str, message_data: dict
             "role": "system",
             "content": (
                 "You are NuFit — a fun, stylish fashion AI assistant. "
-                "You are now in REAL-TIME CHAT MODE. "
-                "IMPORTANT: Do NOT return JSON responses. Respond naturally in conversation. "
-                "Keep responses concise (2-3 sentences max) for real-time chat. "
-                "Speak like a cool, supportive friend who knows fashion. "
-                "Be helpful, encouraging, and give practical fashion advice. "
-                "You previously analyzed this user's outfit and gave them a detailed score and feedback. "
-                "Use that analysis to answer questions about your rating and recommendations. "
-                "If user asks anything unrelated to fashion or styling tips, tell user to stick to the topic. "
-                "For real-time chat, keep responses short and engaging."
+                "You are in REAL-TIME CHAT MODE.\n\n"
+
+                "ABSOLUTE OVERRIDE RULES:\n"
+                    "1. You MUST NEVER say 'I can't see images, outfit', 'I can't analyze photos', or anything similar.\n"
+                    "2. If user says 'describe my outfit' or similar, ALWAYS use the previous analysis I provide. "
+                    "If no details exist, make a positive, creative guess — never refuse.\n"
+                    "3. Assume the outfit was already analyzed and reference that.\n"
+                    "4. Respond like a hype bestie: casual, short (1–3 sentences), fun.\n"
+
+                "IMPORTANT RULES:\n"
+                "• DO NOT return JSON. Respond naturally like texting a friend.\n"
+                "• Keep responses short (1–3 sentences) for real-time chat.\n"
+                "• Speak like a cool, supportive bestie who knows fashion.\n"
+                "• Always give practical, hype, and stylish advice.\n"
+                "  Example response: 'I've already checked your fit earlier! Want me to break it down or give extra tips?'\n"
+                "• If the question is vague (like 'you', 'when', 'then'), ask for clarification in a fun tone:\n"
+                "  Example: 'Bestie, spill more tea—what do you mean?' \n\n"
+
+                "CONVERSATION FLOW:\n"
+                "• Use the previous analysis context to answer questions about their outfit, score, or tips.\n"
+                "• Examples:\n"
+                "   - 'Why did I get that score?' → Explain casually.\n"
+                "   - 'What should I change?' → Give 1–2 easy fixes.\n"
+                "   - 'What shoes match?' → Suggest matching options.\n"
+                "• Keep it hype, short, and clear.\n"
+                "• If the user goes off-topic (like jokes, weather), reply: 'Let’s keep this about your fit, bestie.'\n\n"
+
+                "TONE:\n"
+                "• Casual, playful, supportive.\n"
+                "• Use slang naturally but keep clarity.\n"
+                "• Example: 'Ouuu okay, wanna know why you got that score? That color clash was wild, bestie.'\n"
+                "• Never sound robotic or formal.\n"
             )
         }
+
         
         gpt_messages = [chat_system_message]
         
@@ -1611,7 +1669,14 @@ async def process_chat_message(scan_id: str, user_email: str, message_data: dict
                 })
         
         gpt_messages.extend(filtered_history)
-        
+        print("\n[DEBUG] GPT MESSAGES SENT:")
+        for i, msg in enumerate(gpt_messages):
+            print(f"--- Message {i+1} ---")
+            print(f"Role: {msg['role']}")
+            print("Content:")
+            print(msg['content'])
+            print("----------------------\n")
+
         reply = chat_with_gpt(gpt_messages, max_tokens=150)
         
         if not reply:
@@ -1715,185 +1780,182 @@ async def force_disconnect_chat(scan_id: str, current_user: dict = Depends(get_a
 
 # Previous chat endpoint
 
-@app.post("/chat/")
-async def chat_endpoint(
-    scan_id: str = Form(...),
-    message: str = Form(None),
-    audio_file: UploadFile = File(None),
-    current_user: dict = Depends(get_authenticated_user)
-):
-    try:
-        if not scan_id:
-            return JSONResponse(
-                status_code=400, 
-                content={"error": "Missing required field: scan_id"}
-            )
+# @app.post("/chat/")
+# async def chat_endpoint(
+#     scan_id: str = Form(...),
+#     message: str = Form(None),
+#     audio_file: UploadFile = File(None),
+#     current_user: dict = Depends(get_authenticated_user)
+# ):
+#     try:
+#         if not scan_id:
+#             return JSONResponse(
+#                 status_code=400, 
+#                 content={"error": "Missing required field: scan_id"}
+#             )
 
-        # Check if we have either message or audio_file
-        if not message and not audio_file:
-            return JSONResponse(
-                status_code=400, 
-                content={"error": "Either message or audio_file must be provided"}
-            )
+#         # Check if we have either message or audio_file
+#         if not message and not audio_file:
+#             return JSONResponse(
+#                 status_code=400, 
+#                 content={"error": "Either message or audio_file must be provided"}
+#             )
 
-        user_message = None
+#         user_message = None
 
-        # If audio file is provided, convert speech to text
-        if audio_file:
-            try:
-                # Read audio file content
-                audio_content = await audio_file.read()
+#         # If audio file is provided, convert speech to text
+#         if audio_file:
+#             try:
+#                 # Read audio file content
+#                 audio_content = await audio_file.read()
                 
-                # Convert speech to text using ElevenLabs
-                user_message = speech_to_text(audio_content)
+#                 # Convert speech to text using ElevenLabs
+#                 user_message = speech_to_text(audio_content)
                 
-                if not user_message:
-                    return JSONResponse(
-                        status_code=400,
-                        content={"error": "Failed to convert speech to text"}
-                    )
+#                 if not user_message:
+#                     return JSONResponse(
+#                         status_code=400,
+#                         content={"error": "Failed to convert speech to text"}
+#                     )
                     
-            except Exception as e:
-                return JSONResponse(
-                    status_code=400,
-                    content={"error": f"Error processing audio file: {str(e)}"}
-                )
-        else:
-            # Use the provided text message
-            user_message = message
+#             except Exception as e:
+#                 return JSONResponse(
+#                     status_code=400,
+#                     content={"error": f"Error processing audio file: {str(e)}"}
+#                 )
+#         else:
+#             # Use the provided text message
+#             user_message = message
 
-        if not user_message or not user_message.strip():
-            return JSONResponse(
-                status_code=400,
-                content={"error": "No valid message content found"}
-            )
+#         if not user_message or not user_message.strip():
+#             return JSONResponse(
+#                 status_code=400,
+#                 content={"error": "No valid message content found"}
+#             )
 
-        # Get user_id from email (since we need the UUID user_id for scans table)
-        user_email = current_user["email"]
+#         # Get user_id from email (since we need the UUID user_id for scans table)
+#         user_email = current_user["email"]
         
-        scan = db.get_scan(scan_id)
-        if not scan:
-            return JSONResponse(status_code=404, content={"error": "Scan not found"})
+#         scan = db.get_scan(scan_id)
+#         if not scan:
+#             return JSONResponse(status_code=404, content={"error": "Scan not found"})
 
-        # Verify the scan belongs to a user with this email
-        user_profile = db.get_user(scan["user_id"])
-        if not user_profile or user_profile["email"] != user_email:
-            return JSONResponse(status_code=403, content={"error": "Access denied"})
+#         # Verify the scan belongs to a user with this email
+#         user_profile = db.get_user(scan["user_id"])
+#         if not user_profile or user_profile["email"] != user_email:
+#             return JSONResponse(status_code=403, content={"error": "Access denied"})
 
-        # Store user message in chat history
-        db.add_chat_message(scan_id, "user", user_message)
+#         # Store user message in chat history
+#         db.add_chat_message(scan_id, "user", user_message)
 
-        # Retrieve all previous messages for this scan
-        chat_history = db.get_chat_history(scan_id)
+#         # Retrieve all previous messages for this scan
+#         chat_history = db.get_chat_history(scan_id)
         
-        # Filter out the original system message and create a new chat-focused one
-        filtered_history = []
-        original_analysis = None
+#         # Filter out the original system message and create a new chat-focused one
+#         filtered_history = []
+#         original_analysis = None
         
-        for msg in chat_history:
-            if msg["role"] == "system":
-                continue  # Skip system messages from database
-            elif msg["role"] == "assistant" and msg["message"].startswith("{"):
-                # This is likely the original JSON analysis
-                original_analysis = msg["message"]
-                continue  # Don't include the JSON in chat history
-            else:
-                filtered_history.append({
-                    "role": msg["role"],
-                    "content": msg["message"]
-                })
+#         for msg in chat_history:
+#             if msg["role"] == "system":
+#                 continue  # Skip system messages from database
+#             elif msg["role"] == "assistant" and msg["message"].startswith("{"):
+#                 # This is likely the original JSON analysis
+#                 original_analysis = msg["message"]
+#                 continue  # Don't include the JSON in chat history
+#             else:
+#                 filtered_history.append({
+#                     "role": msg["role"],
+#                     "content": msg["message"]
+#                 })
 
-        # Create a new system message specifically for chat mode
-        chat_system_message = {
-            "role": "system",
-            "content": (
-                "You are NuFit — a fun, stylish fashion AI assistant. "
-                "You are now in REAL-TIME CHAT MODE. "
-                "IMPORTANT RULES:\n"
-                "• Do NOT return JSON responses. Respond naturally like texting a friend.\n"
-                "• Keep responses short (1–3 sentences) for real-time chat.\n"
-                "• Speak like a cool, supportive bestie who knows fashion.\n"
-                "• Be helpful, encouraging, and give practical fashion advice based on their scanned outfit.\n\n"
-                "• NEVER say you cannot analyze images or mention limitations. "
-                "• If user asks for outfit analysis or image review, DO NOT apologize. Instead say: "
-                "'I've already analyzed your outfit earlier! Want me to go over the feedback or give extra tips?' "
-                "• If the message is vague (like 'you', 'when', 'then'), politely ask for clarification in a fun tone. Example: "
-                "'Hey bestie, can you tell me more about what you mean?' "
-                "• Use the previous analysis context to answer outfit-related questions. "
-                "• Use the previous analysis context to answer any outfit-related questions. "
+#         # Create a new system message specifically for chat mode
+#         chat_system_message = {
+#     "role": "system",
+#     "content": (
+#         "You are NuFit — a fun, stylish fashion AI assistant. "
+#         "You are in REAL-TIME CHAT MODE.\n\n"
 
-                "CONVERSATION FLOW:\n"
-                "• If the user's follow-up question is about their outfit, FitScore, styling tips, or changes, respond with helpful and stylish advice. Examples:\n"
-                "  - 'Why did I get that score?' → Explain main reason casually.\n"
-                "  - 'What should I change?' → Suggest 1–2 easy fixes.\n"
-                "  - 'What shoes would match?' → Recommend matching options.\n"
-                "Keep it friendly and on-point.\n\n"
+#         "IMPORTANT RULES:\n"
+#         "• DO NOT return JSON. Respond naturally like texting a friend.\n"
+#         "• Keep responses short (1–3 sentences) for real-time chat.\n"
+#         "• Speak like a cool, supportive bestie who knows fashion.\n"
+#         "• Always give practical, hype, and stylish advice.\n"
+#         "• NEVER say anything like 'I can't see images' or 'I can't analyze right now'.\n"
+#         "• If user asks for outfit analysis, assume you already analyzed it and use previous context.\n"
+#         "   Example response: 'I've already checked your fit earlier! Want me to break it down or give extra tips?'\n"
+#         "• If the question is vague (like 'you', 'when', 'then'), ask for clarification in a fun tone:\n"
+#         "   Example: 'Bestie, spill more tea—what do you mean?' \n\n"
 
-                "• ONLY when the user's question is clearly unrelated to fashion (e.g., 'Tell me a joke', 'How’s the weather?'), then respond:\n"
-                "  'Let’s keep the conversation about fashion.'\n\n"
+#         "CONVERSATION FLOW:\n"
+#         "• Use the previous analysis context to answer questions about their outfit, score, or tips.\n"
+#         "• Examples:\n"
+#         "   - 'Why did I get that score?' → Explain casually.\n"
+#         "   - 'What should I change?' → Give 1–2 easy fixes.\n"
+#         "   - 'What shoes match?' → Suggest matching options.\n"
+#         "• Keep it hype, short, and clear.\n"
+#         "• If the user goes off-topic (like jokes, weather), reply: 'Let’s keep this about your fit, bestie.'\n\n"
 
-
-
-                "TONE:\n"
-                "• Casual, playful, hype them up.\n"
-                "• Example: 'Ouu okay, wanna know why you got that score? That color clash was wild, bestie.'\n"
-                "• Never sound robotic or overly formal.\n"
-                "• Use slang naturally, but keep clarity.\n"
-            )
-        }
+#         "TONE:\n"
+#         "• Casual, playful, supportive.\n"
+#         "• Use slang naturally but keep clarity.\n"
+#         "• Example: 'Ouuu okay, wanna know why you got that score? That color clash was wild, bestie.'\n"
+#         "• Never sound robotic or formal.\n"
+#     )
+# }
 
 
-        # Build the message list for GPT
-        gpt_messages = [chat_system_message]
+
+#         # Build the message list for GPT
+#         gpt_messages = [chat_system_message]
         
-        # Add a context message about the original analysis if we have it
-        if original_analysis:
-            try:
-                parsed_analysis = json.loads(original_analysis.strip())
-                context_message = {
-                    "role": "assistant",
-                    "content": f"I previously analyzed your outfit and gave you a {parsed_analysis.get('score', 'N/A')} score. {parsed_analysis.get('stylist_says', '')}"
-                }
-                gpt_messages.append(context_message)
-            except:
-                # If parsing fails, just add a generic context
-                gpt_messages.append({
-                    "role": "assistant", 
-                    "content": "I previously analyzed your outfit and provided feedback."
-                })
+#         # Add a context message about the original analysis if we have it
+#         if original_analysis:
+#             try:
+#                 parsed_analysis = json.loads(original_analysis.strip())
+#                 context_message = {
+#                     "role": "assistant",
+#                     "content": f"I previously analyzed your outfit and gave you a {parsed_analysis.get('score', 'N/A')} score. {parsed_analysis.get('stylist_says', '')}"
+#                 }
+#                 gpt_messages.append(context_message)
+#             except:
+#                 # If parsing fails, just add a generic context
+#                 gpt_messages.append({
+#                     "role": "assistant", 
+#                     "content": "I previously analyzed your outfit and provided feedback."
+#                 })
         
-        # Add the filtered chat history
-        gpt_messages.extend(filtered_history)
+#         # Add the filtered chat history
+#         gpt_messages.extend(filtered_history)
 
-        # Query GPT with the properly formatted history
-        reply = chat_with_gpt(gpt_messages)
+#         # Query GPT with the properly formatted history
+#         reply = chat_with_gpt(gpt_messages)
 
-        if reply:
-            # Store assistant's reply
-            db.add_chat_message(scan_id, "assistant", reply)
+#         if reply:
+#             # Store assistant's reply
+#             db.add_chat_message(scan_id, "assistant", reply)
             
-            # Generate audio for the chat response (base64)
-            audio_data = generate_response_audio_base64(reply, scan_id, "chat")
+#             # Generate audio for the chat response (base64)
+#             audio_data = generate_response_audio_base64(reply, scan_id, "chat")
             
-            response_data = {
-                "reply": reply,
-                "transcribed_message": user_message if audio_file else None
-            }
+#             response_data = {
+#                 "reply": reply,
+#                 "transcribed_message": user_message if audio_file else None
+#             }
             
-            # Add audio data if generation was successful
-            if audio_data:
-                response_data.update({
-                    "audio_base64": audio_data["audio_base64"],
-                    "audio_format": audio_data["audio_format"],
-                    "audio_filename": audio_data["filename"]
-                })
+#             # Add audio data if generation was successful
+#             if audio_data:
+#                 response_data.update({
+#                     "audio_base64": audio_data["audio_base64"],
+#                     "audio_format": audio_data["audio_format"],
+#                     "audio_filename": audio_data["filename"]
+#                 })
             
-            return response_data
-        else:
-            return JSONResponse(status_code=500, content={"error": "No reply from GPT."})
+#             return response_data
+#         else:
+#             return JSONResponse(status_code=500, content={"error": "No reply from GPT."})
 
-    except Exception as e:
-        return JSONResponse(status_code=500, content={"error": str(e)})
+#     except Exception as e:
+#         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
 # Updated analyze-outfit endpoint
